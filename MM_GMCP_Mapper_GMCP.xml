@@ -118,7 +118,7 @@ Syntax:
 
 > Maintanence:
 
-* mapper purge area <full_area_name>  - delete an entire area from the database
+* mapper purge area <full_area_name>  - delete an entire area from the database (shows room count; repeat with 'confirm' appended to proceed)
 * mapper purge wilds <full_plane_name>  - deletes rooms in the vmap except for roads
 * mapper purge pursuer  - delete changing orc pursuer maze info from the database
 * mapper purge sandbox  - delete housing sandbox info from the database
@@ -527,7 +527,7 @@ http://github.com/MateriaMagicaLLC/mm-mushclient-scripts
 
   <alias
     enabled="y"
-    match="^mapper[ ]+purge[ ]+area[ ]+(?<name>[a-zA-Z0-9 \,\.\'\-]+)$"
+    match="^mapper[ ]+purge[ ]+area[ ]+(?<name>[a-zA-Z0-9 \,\.\'\-]+?)(?:[ ]+(?<confirm>confirm))?$"
     regexp="y"
     sequence="100"
     script="purge_entire_area"
@@ -4580,6 +4580,14 @@ function del_exit_tags_from_database(uid, dir)
 end
 
 
+function del_all_exit_tags_from_database(uid)
+  dbcheck(db:execute(string.format(
+    "DELETE FROM exits_tags WHERE fromuid = %s;",
+      fixsql(uid)
+  )))
+end
+
+
 
 -----------------
 -- delete exits
@@ -5432,6 +5440,12 @@ function purge_entire_area(name, line, wildcards)
     arooms[#arooms + 1] = row.uid
   end -- finding rooms
 
+  if (#arooms > 0) and (wildcards.confirm == "") then
+    mapper.mapprint("This will permanently delete " .. #arooms .. " rooms from '" .. name .. "'.")
+    mapper.mapprint("Type 'mapper purge area " .. name .. " confirm' to proceed.")
+    return
+  end
+
   purge_stuff(arooms, name, false)
 end
 
@@ -5591,18 +5605,14 @@ end
 
 function nuke_room(uid)
   SetStatus("Erasing room " .. uid .. "...")
+
+  -- bookmarks, player_tags and exits_tags hold foreign keys into rooms(uid),
+  -- so they must be deleted before the room itself
+  del_bookmark_from_database(uid)
+  del_tags_from_database(uid)
+  del_all_exit_tags_from_database(uid)
   del_exits_from_database(uid)
   del_room_from_database(uid)
-
-  local notes = load_notes_from_database(uid)
-  if (notes) then
-    del_bookmark_from_database(uid)
-  end
-
-  local tags = load_tags_from_database(uid)
-  if (tags) then
-    del_tags_from_database(uid)
-  end
 
   -- update in-memory table
   rooms[uid] = nil
@@ -5631,14 +5641,7 @@ function purge_clanhalls()
 
   mapper.mapprint("Purging clan halls data...")
   for i = 1, #crooms do
-    SetStatus("Erasing room " .. crooms[i] .. "...")
-
-    del_exits_from_database(crooms[i])
-
-    del_room_from_database(crooms[i])
-
-    -- update in-memory table
-    rooms[crooms[i]] = nil
+    nuke_room(crooms[i])
   end
 
   db:exec("COMMIT;")
@@ -5666,14 +5669,7 @@ function purge_player_homes()
 
   mapper.mapprint("Purging player homes data...")
   for i = 1, #hrooms do
-    SetStatus("Erasing room " .. hrooms[i] .. "...")
-
-    del_exits_from_database(hrooms[i])
-
-    del_room_from_database(hrooms[i])
-
-    -- update in-memory table
-    rooms[hrooms[i]] = nil
+    nuke_room(hrooms[i])
   end
 
   db:exec("COMMIT;")
