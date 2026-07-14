@@ -95,7 +95,7 @@ Syntax:
 * mapper safes  - show nearby safe rooms
 * mapper cpks  - show nearby CPK rooms
 
-* mapper dts - show nearby death traps
+* mapper dts [all] - show nearby death traps ('all' lists them database-wide)
 * mapper shops  - show nearby shops
 * mapper trainers  - show nearby trainers
 
@@ -411,7 +411,7 @@ http://github.com/MateriaMagicaLLC/mm-mushclient-scripts
 
   <alias
     enabled="y"
-    match="^mapper[ ]+dts$"
+    match="^mapper[ ]+dts(|[ ]+(?<all>all))$"
     regexp="y"
     sequence="100"
     script="map_dts"
@@ -2975,7 +2975,7 @@ function map_cpk()
 end
 
 
-function map_dts()
+function map_dts(name, line, wildcards)
   if (peeking) then
     return
   end
@@ -2985,7 +2985,7 @@ function map_dts()
     return
   end
 
-  map_where_by_tags("dt")
+  map_where_by_tags("dt", wildcards.all == "all")
 end
 
 
@@ -3054,7 +3054,7 @@ function map_find_by_tags(tags)
 end
 
 
-function map_where_by_tags(tags)
+function map_where_by_tags(tags, everywhere)
   local stags = utils.split(tags, " ")
   local rarea = current_area
   local t = {}
@@ -3063,7 +3063,7 @@ function map_where_by_tags(tags)
   for row in db:nrows(string.format('SELECT * FROM player_tags')) do
     room = do_load_room(row.uid)
 
-    if (room.area == rarea) then
+    if (everywhere) or (room.area == rarea) then
       rtags = row.tags
       rtags = string.gsub(rtags or "", " ", "")
       rtags = utils.split(rtags, ",")
@@ -3074,7 +3074,11 @@ function map_where_by_tags(tags)
     end
   end -- finding rooms
 
-  mapper.mapprint("Results for tag(s)", tags, "in the area", rarea)
+  if (everywhere) then
+    mapper.mapprint("Results for tag(s)", tags, "in all areas")
+  else
+    mapper.mapprint("Results for tag(s)", tags, "in the area", rarea)
+  end
   show_hyperlinks(t)
 
   if (verbose_mode) then
