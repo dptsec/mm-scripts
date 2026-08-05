@@ -932,12 +932,24 @@ end
 
 package.loaded.mm_mapper = nil
 
+-- Prefer the mm_mapper.lua shipped next to this plugin file so the mapper
+-- logic always matches the plugin version. The copy MacMUSH seeds into
+-- <app dir>/lua is refreshed from the app bundle and can lag behind.
+local function mapper_auxiliary_dir()
+  local plugin_dir = GetPluginInfo(GetPluginID(), 20) or ""
+  if (plugin_dir ~= "") and file_exists(plugin_dir .. "mm_mapper.lua") then
+    return plugin_dir
+  end
+  return GetInfo(66) .. "lua/"
+end
+
 function mapper_auxiliary_path()
-  return GetInfo(66) .. "lua/mm_mapper.lua"
+  return mapper_auxiliary_dir() .. "mm_mapper.lua"
 end
 
 
 if (file_exists(mapper_auxiliary_path())) then
+  package.path = mapper_auxiliary_dir() .. "?.lua;" .. package.path
   mapper = require "mm_mapper"
 else
   require "mapper"
@@ -1127,11 +1139,11 @@ end
 function warn_if_mapper_auxiliary_is_stale()
   local features = mapper.PATHFINDER_FEATURES or {}
 
-  if (not features.batch_room_loader) then
+  if (not features.batch_room_loader) or (not features.deferred_speedwalk_recovery) then
     ColourTell("white", "maroon", "GMCP Mapper WARNING: ")
     ColourTell("lime", "maroon", "mm_mapper.lua")
-    ColourNote("white", "maroon", " is missing the latest pathfinding optimizations. Update the plugin auxiliary files and reinstall/reload the mapper.")
-    ColourNote("white", "maroon", "Expected path: " .. mapper_auxiliary_path())
+    ColourNote("white", "maroon", " is older than this plugin. Update the plugin auxiliary files and reinstall/reload the mapper.")
+    ColourNote("white", "maroon", "Loaded path: " .. mapper_auxiliary_path())
   end
 end
 

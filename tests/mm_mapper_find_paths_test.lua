@@ -814,6 +814,56 @@ tests[#tests + 1] = {
 }
 
 tests[#tests + 1] = {
+  name = "crosswind_replacing_a_step_recovers_and_continues_speedwalk",
+  run = function()
+  -- Mirrors the Oceanus Ingenii log: the crosswind replaced the eastward
+  -- step entirely, so reversing the wind returns to the origin room, not
+  -- the expected room, and a second displacement step is needed.
+  local graph = {
+    O = { exits = { east = "X" } },
+    X = { exits = { east = "X2" } },
+    X2 = { exits = {} },
+    -- W intentionally unmapped: a wilds room with no recorded exits
+  }
+  executed_commands = {}
+
+  init_mapper_for_speedwalk(graph, function(details)
+    -- a mapped room with a direct exit to the expected room recovers the
+    -- same way the plugin's displacement handler does from the database
+    local actual = graph[details.actual_uid]
+    if actual then
+      for dir, touid in pairs(actual.exits) do
+        if touid == details.expected_uid then
+          return dir
+        end
+      end
+    end
+    -- blown into an unknown room; wait for the crosswind message
+    return mapper.SPEEDWALK_MISMATCH_DEFERRED
+  end)
+
+  mapper.draw("O")
+  mapper.start_speedwalk({ { dir = "east", uid = "X" }, { dir = "east", uid = "X2" } })
+  assert_equal(executed_commands[1], "east", "first step")
+
+  mapper.draw("W")
+  assert(mapper.has_deferred_speedwalk_mismatch(), "expected deferred mismatch")
+
+  -- "You are buffeted to the southeast by crosswinds!" arrives
+  assert(mapper.resume_speedwalk_recovery("nw"), "expected recovery to start")
+  assert_equal(executed_commands[2], "nw", "reverse of the crosswind direction")
+
+  mapper.draw("O")
+  assert_equal(executed_commands[3], "east", "displacement step toward expected room")
+
+  mapper.draw("X")
+  assert_equal(executed_commands[4], "east", "speedwalk resumes with next step")
+  mapper.cancel_speedwalk()
+  end,
+}
+
+
+tests[#tests + 1] = {
   name = "map_rendering_uses_batch_room_loader",
   run = function()
   local graph = {

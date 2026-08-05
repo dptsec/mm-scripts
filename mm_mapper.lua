@@ -116,6 +116,7 @@ PATHFINDER_FEATURES = {
   batch_exit_loaders = true,
   batch_room_loader = true,
   batch_draw_room_loader = true,
+  deferred_speedwalk_recovery = true,
 }
 
 require "movewindow"
