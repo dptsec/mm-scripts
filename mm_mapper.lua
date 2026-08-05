@@ -1264,8 +1264,10 @@ local function ensure_sorted_reverse_exits_for_exact_path (uids)
 end -- ensure_sorted_reverse_exits_for_exact_path
 
 
-local function check_if_should_walk(next_dir, next_uid)
-  if (not can_exit_be_used_on_speedwalks(current_room, next_dir)) then
+local function check_if_should_walk(next_dir, next_uid, from_uid)
+  local source_uid = from_uid or current_room
+
+  if (not can_exit_be_used_on_speedwalks(source_uid, next_dir)) then
     cancel_speedwalk ("exit " .. next_dir .. " can't be used on speedwalks")
     return false
   end
@@ -1313,7 +1315,7 @@ local function changed_room (uid)
       if recovery_dir then
         next_speedwalk_dir = recovery_dir
         next_dir = (expand_direction[recovery_dir] or recovery_dir)
-        if (not check_if_should_walk(next_dir, expected_room)) then
+        if (not check_if_should_walk(next_dir, expected_room, uid)) then
           return
         end
         SetStatus ("Recovering from forced movement: " .. next_dir)

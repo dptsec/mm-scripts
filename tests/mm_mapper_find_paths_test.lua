@@ -758,6 +758,33 @@ tests[#tests + 1] = {
 }
 
 tests[#tests + 1] = {
+  name = "speedwalk_recovery_validates_from_actual_room",
+  run = function()
+  local graph = {
+    S = { exits = { east = "A" } },
+    A = { exits = {} },
+    B = { exits = { west = "A" } },
+  }
+  local mismatch
+  executed_commands = {}
+
+  init_mapper_for_speedwalk(graph, function(details)
+    mismatch = details
+    return "west"
+  end)
+
+  mapper.draw("S")
+  mapper.start_speedwalk({ { dir = "east", uid = "A" } })
+  mapper.draw("B")
+
+  assert(mismatch, "expected mismatch callback")
+  assert_equal(executed_commands[1], "east", "sent command")
+  assert_equal(executed_commands[2], "west", "recovery command")
+  assert_equal(mapper.get_next_dir(), "west", "recovery direction")
+  end,
+}
+
+tests[#tests + 1] = {
   name = "map_rendering_uses_batch_room_loader",
   run = function()
   local graph = {

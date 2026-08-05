@@ -1149,7 +1149,7 @@ function mapper_speedwalk_mismatch(details)
 
   if (db) and (details.fromuid) and (details.dir) then
     for row in db:nrows(string.format(
-      "SELECT touid FROM exits WHERE fromuid = %s AND dir = %s LIMIT 1",
+      "SELECT touid FROM active_exits WHERE fromuid = %s AND dir = %s LIMIT 1",
       fixsql(fromuid),
       fixsql(dir))) do
       database_uid = tostring(row.touid)
@@ -1250,13 +1250,12 @@ function handle_direct_displacement_speedwalk_mismatch(details)
 
   local sql = latest_exits_where(string.format(
     "e.fromuid = %s AND e.touid = %s",
-    fixsql(expected_uid),
-    fixsql(actual_uid)))
+    fixsql(actual_uid),
+    fixsql(expected_uid)))
 
   for row in db:nrows(sql) do
-    local displaced_dir = string.lower(tostring(row.dir or ""))
-    local recovery_dir = crosswind_return_direction[displaced_dir]
-    if recovery_dir then
+    local recovery_dir = string.lower(tostring(row.dir or ""))
+    if recovery_dir ~= "" then
       mapper.mapprint(string.format(
         "Speedwalk displacement detected; moving %s to return from %s to expected room %s.",
         recovery_dir,
