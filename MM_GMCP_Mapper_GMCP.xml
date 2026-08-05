@@ -3461,10 +3461,13 @@ function process_room()
     first_room = false
   end
 
+  local track_speedwalk = (mapper.get_next_dir() ~= nil)
+
   if (uid)
   -- and not is_maze(uid) -- we're not in a maze
   and ((config2.do_map_wilds) -- we're mapping the wilds
-    or ((not is_vmap(zone) or (is_road(terrain) and not is_cave(roomname))))) then
+    or ((not is_vmap(zone) or (is_road(terrain) and not is_cave(roomname))))
+    or track_speedwalk) then
   -- or we're in a part of the wilds that we always wanna map
 --    print(uid)
     mapper_redraw() -- call mapper to draw this rom
