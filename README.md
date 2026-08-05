@@ -1,52 +1,31 @@
-# MacMUSH Mapper Improvements
+# Materia Magica Mapper for MacMUSH
 
-This repository contains the Materia Magica mapper for MacMUSH/MUSHclient:
+A GMCP-driven mapper plugin for Materia Magica on MacMUSH/MUSHclient:
 
-- [`src/mm_mapper.lua`](src/mm_mapper.lua) — map rendering, pathfinding, and speedwalking.
-- [`src/MM_GMCP_Mapper_GMCP.xml`](src/MM_GMCP_Mapper_GMCP.xml) — GMCP handling, database storage, and plugin integration.
+- [`MM_GMCP_Mapper_GMCP.xml`](MM_GMCP_Mapper_GMCP.xml) — the plugin: GMCP handling, SQLite map database, triggers, aliases, and recovery logic.
+- [`mm_mapper.lua`](mm_mapper.lua) — the mapper module: map rendering, pathfinding, and speedwalking.
 
-## What changed
+## Functionality
 
-### Faster mapper
+### Mapping and pathfinding
 
-- Exact paths now use bidirectional breadth-first search.
-- Room and exit data can be loaded in batches instead of one database query at a time.
-- Path and exit caches reduce repeated work.
-- Caches automatically invalidate when the map database changes.
-- Path construction uses less copying and fewer temporary tables.
-- Equal-length paths use stable direction ordering.
+- Rooms and exits arrive via GMCP and are stored in a SQLite database; the map draws in a miniwindow with terrain, flags, bookmarks, and configurable display options.
+- Exact paths use bidirectional breadth-first search with batched database loads and caches that invalidate automatically when the map database changes.
+- Pathfinding honors no-speed, grappling, safewalk, and one-way-exit rules, and newly mapped rooms become usable immediately.
 
-### Safer and more reliable behavior
+### Speedwalking
 
-- Newly mapped rooms become available immediately after database updates.
-- Missing rooms are cached without becoming permanent stale results.
-- Existing no-speed, grappling, safe-walk, one-way-exit, and scan-depth rules remain active.
-- Speedwalk mismatches now report the attempted edge and actual room clearly.
-- Crosswind and displacement recovery only run for valid, active speedwalks.
+- Speedwalks verify every step: each arrival is checked against the expected room, with clear diagnostics when they differ.
+- Forced movement is recovered automatically. When wind blows you off course (e.g. ocean crosswinds), the mapper briefly defers the mismatch, reads the crosswind message, steps back against the wind, and re-routes through known exits — including through unmapped wilderness rooms. A walk only cancels when a displacement can't be identified and corrected.
+- `mapper pause` freezes an in-progress speedwalk (remaining steps are kept); `mapper resume` continues it from the room where the walk stopped. Moving elsewhere while paused, or starting a new walk, discards the frozen walk.
 
-### GMCP and database improvements
+## How the module loads
 
-- GMCP room and exit data is parsed more directly and efficiently.
-- UID keys are normalized consistently between GMCP, SQLite, and Lua caches.
-- Batch path loaders reuse cached rooms and avoid duplicate lookups.
-- Indexes were added for common forward-exit, reverse-exit, room-tag, and exit-tag queries.
-- The extra recursive reachability scan was removed; pathfinding performs the reachability check once.
-
-## Runtime file
-
-MacMUSH loads the auxiliary mapper from:
-
-```text
-~/Library/Application Support/MacMUSH/state/lua/mm_mapper.lua
-```
-
-Keep that copy synchronized with `src/mm_mapper.lua`. The exact state root is provided by `GetInfo(66)`.
-
-Mushclient will vary by installation.
+The plugin loads `mm_mapper.lua` from its own directory first, so the two files in this repository always run together. A copy under the MacMUSH state directory (`GetInfo(66) .. "lua/"`) is only a fallback, and the plugin prints a loud warning at startup if the module it loaded is older than the plugin.
 
 ## Verification
 
 ```sh
-luajit -b src/mm_mapper.lua /tmp/mm_mapper.luac
+luajit -bl mm_mapper.lua > /dev/null   # syntax check
 luajit tests/mm_mapper_find_paths_test.lua
 ```
