@@ -862,6 +862,54 @@ tests[#tests + 1] = {
   end,
 }
 
+tests[#tests + 1] = {
+  name = "late_crosswind_message_does_not_double_recover_after_displacement_fix",
+  run = function()
+  -- Mirrors the second Oceanus Ingenii log: the wind displaced the player
+  -- before the queued step executed, so GMCP reported two rooms. The second
+  -- mismatch was fixed synchronously by the displacement handler; the
+  -- crosswind text arriving afterwards must not trigger another recovery.
+  local graph = {
+    O = { exits = { north = "X" } },
+    X = { exits = { north = "X2" } },
+    X2 = { exits = {} },
+    M = { exits = { northwest = "X" } },
+    -- W intentionally unmapped: the wind destination has no recorded exits
+  }
+  executed_commands = {}
+
+  init_mapper_for_speedwalk(graph, function(details)
+    local actual = graph[details.actual_uid]
+    if actual then
+      for dir, touid in pairs(actual.exits) do
+        if touid == details.expected_uid then
+          return dir
+        end
+      end
+    end
+    return mapper.SPEEDWALK_MISMATCH_DEFERRED
+  end)
+
+  mapper.draw("O")
+  mapper.start_speedwalk({ { dir = "north", uid = "X" }, { dir = "north", uid = "X2" } })
+  assert_equal(executed_commands[1], "north", "first step")
+
+  mapper.draw("W")
+  assert(mapper.has_deferred_speedwalk_mismatch(), "expected deferred mismatch after wind room")
+
+  mapper.draw("M")
+  assert_equal(executed_commands[2], "northwest", "displacement recovery")
+  assert(not mapper.has_deferred_speedwalk_mismatch(), "synchronous recovery should clear deferred state")
+
+  -- the crosswind text arrives only now; it must not fire a second command
+  assert_equal(mapper.resume_speedwalk_recovery("nw"), false, "late crosswind resume rejected")
+  assert_equal(executed_commands[3], nil, "no spurious second recovery command")
+
+  mapper.draw("X")
+  assert_equal(executed_commands[3], "north", "speedwalk resumes with next step")
+  mapper.cancel_speedwalk()
+  end,
+}
 
 tests[#tests + 1] = {
   name = "map_rendering_uses_batch_room_loader",

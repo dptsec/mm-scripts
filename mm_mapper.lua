@@ -1326,6 +1326,7 @@ local function changed_room (uid)
       end -- if mismatch handler supplied
 
       if recovery_dir then
+        deferred_speedwalk_mismatch = nil
         next_speedwalk_dir = recovery_dir
         next_dir = (expand_direction[recovery_dir] or recovery_dir)
         if (not check_if_should_walk(next_dir, expected_room, uid)) then
