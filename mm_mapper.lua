@@ -2363,6 +2363,7 @@ function start_speedwalk (path)
     return
   end -- if
 
+  paused_speedwalk = nil
   current_speedwalk = path
   speedwalk_index = 1
 

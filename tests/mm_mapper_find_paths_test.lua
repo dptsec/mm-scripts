@@ -1014,6 +1014,47 @@ tests[#tests + 1] = {
 }
 
 tests[#tests + 1] = {
+  name = "starting_new_speedwalk_discards_paused_snapshot",
+  run = function()
+  local graph = {
+    A = { exits = { east = "B" } },
+    B = { exits = { east = "C" } },
+    C = { exits = { east = "D" } },
+    D = { exits = { west = "C" } },
+  }
+  executed_commands = {}
+  init_mapper_for_speedwalk(graph, nil)
+
+  mapper.draw("A")
+  mapper.start_speedwalk({
+    { dir = "east", uid = "B" },
+    { dir = "east", uid = "C" },
+    { dir = "east", uid = "D" },
+  })
+  assert_equal(executed_commands[1], "east", "first step")
+  mapper.draw("B")
+  assert_equal(executed_commands[2], "east", "second step in flight")
+
+  mapper.pause_speedwalk()
+  mapper.draw("C")
+  assert_equal(executed_commands[3], nil, "paused; frozen in room C with one step left")
+
+  mapper.start_speedwalk({
+    { dir = "east", uid = "D" },
+    { dir = "west", uid = "C" },
+  })
+  assert_equal(executed_commands[3], "east", "new walk starts")
+  mapper.draw("D")
+  assert_equal(executed_commands[4], "west", "new walk returns")
+  mapper.draw("C")
+  assert_equal(executed_commands[5], nil, "new walk completed back in room C")
+
+  mapper.resume_speedwalk()
+  assert_equal(executed_commands[5], nil, "old snapshot no longer resumable")
+  end,
+}
+
+tests[#tests + 1] = {
   name = "map_rendering_uses_batch_room_loader",
   run = function()
   local graph = {
