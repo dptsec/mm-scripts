@@ -190,6 +190,28 @@ http://github.com/MateriaMagicaLLC/mm-mushclient-scripts
 
   <alias
     enabled="y"
+    match="^mapper[ ]+pause$"
+    regexp="y"
+    sequence="100"
+    omit_from_command_history="y"
+    omit_from_output="y"
+    script="mapper.pause_speedwalk"
+  >
+  </alias>
+
+  <alias
+    enabled="y"
+    match="^mapper[ ]+resume$"
+    regexp="y"
+    sequence="100"
+    omit_from_command_history="y"
+    omit_from_output="y"
+    script="mapper.resume_speedwalk"
+  >
+  </alias>
+
+  <alias
+    enabled="y"
     match="^mapper[ ]+hide$"
     regexp="y"
     send_to="12"
@@ -1139,7 +1161,9 @@ end
 function warn_if_mapper_auxiliary_is_stale()
   local features = mapper.PATHFINDER_FEATURES or {}
 
-  if (not features.batch_room_loader) or (not features.deferred_speedwalk_recovery) then
+  if (not features.batch_room_loader)
+  or (not features.deferred_speedwalk_recovery)
+  or (not features.speedwalk_pause) then
     ColourTell("white", "maroon", "GMCP Mapper WARNING: ")
     ColourTell("lime", "maroon", "mm_mapper.lua")
     ColourNote("white", "maroon", " is older than this plugin. Update the plugin auxiliary files and reinstall/reload the mapper.")
