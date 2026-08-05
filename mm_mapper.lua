@@ -1734,9 +1734,15 @@ function draw (uid)
   -- background texture
   local dir = GetInfo(66)
   local imgpath = dir .. "worlds\\mm_mapper_bg.png"
-  if WindowLoadImage(win, "bg", imgpath) == 0 then
-    local iwidth = WindowImageInfo(win, "bg", 2)
-    local iheight= WindowImageInfo(win, "bg", 3)
+  local iwidth = WindowImageInfo (win, "bg", 2)
+  local iheight = WindowImageInfo (win, "bg", 3)
+  if (not iwidth or iwidth <= 0 or not iheight or iheight <= 0) and
+     WindowLoadImage (win, "bg", imgpath) == 0 then
+    iwidth = WindowImageInfo (win, "bg", 2)
+    iheight = WindowImageInfo (win, "bg", 3)
+  end
+
+  if iwidth and iwidth > 0 and iheight and iheight > 0 then
     local x = 0
     local y = 0
 
