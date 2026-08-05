@@ -3149,14 +3149,15 @@ function map_where_by_tags(tags, everywhere)
   local stags = utils.split(tags, " ")
   local rarea = current_area
   local t = {}
-  local room, rtags
+  local rtags
 
-  for row in db:nrows(string.format('SELECT * FROM player_tags')) do
-    room = do_load_room(row.uid)
-
-    if (everywhere) or (room.area == rarea) then
-      rtags = row.tags
-      rtags = string.gsub(rtags or "", " ", "")
+  for row in db:nrows([[
+    SELECT p.uid, p.tags, r.area
+      FROM player_tags p
+      JOIN rooms r ON r.uid = p.uid
+  ]]) do
+    if (everywhere) or (row.area == rarea) then
+      rtags = string.gsub(row.tags or "", " ", "")
       rtags = utils.split(rtags, ",")
 
       if (has_all(stags, rtags)) then
