@@ -350,6 +350,19 @@ local function normalize_room (uid, room)
   room.fillcolour = room.fillcolour or 0x000000
   room.fillbrush = room.fillbrush or 1 -- no fill
 
+  local mapper_tags = {}
+  local mapper_flags = {}
+  local mapper_exit_tags = {}
+  room._mapper_tags = mapper_tags
+  room._mapper_flags = mapper_flags
+  room._mapper_exit_tags = mapper_exit_tags
+
+  mapper_tags.no_speed = string.find (room.tags or "", "no%-speed") ~= nil
+  mapper_tags.dt = string.find (room.tags or "", "dt") ~= nil
+  mapper_flags.pk = string.find (room.flags or "", "PK") ~= nil
+  mapper_flags.player_kill = string.find (room.flags or "", "player%-kill%-") ~= nil
+  mapper_flags.grapple_required = string.find (room.flags or "", "grapple%-required") ~= nil
+
   return room
 end -- normalize_room
 
@@ -985,8 +998,17 @@ end -- draw_room
 local function is_exit_tagged_as(uid, dir, tag)
   local room = cached_room(uid)
   local dir = shorten_direction[dir] or dir
-  local exits_tags = room.exits_tags
-  return string.find(exits_tags[dir] or "", tag) or false
+  local mapper_exit_tag = room._mapper_exit_tags[dir]
+  if not mapper_exit_tag then
+    mapper_exit_tag = {}
+    room._mapper_exit_tags[dir] = mapper_exit_tag
+  end
+
+  if mapper_exit_tag[tag] == nil then
+    mapper_exit_tag[tag] = string.find(room.exits_tags[dir] or "", tag) ~= nil
+  end
+
+  return mapper_exit_tag[tag]
 end
 
 
@@ -997,14 +1019,30 @@ end
 
 
 local function is_room_tagged_as(uid, tag)
-  local tags = (cached_room(uid) or {}).tags
-  return string.find(tags or "", tag)
+  local room = cached_room(uid) or {}
+  if tag == "no%-speed" then
+    return room._mapper_tags.no_speed
+  elseif tag == "dt" then
+    return room._mapper_tags.dt
+  end
+
+  room._mapper_tags[tag] = string.find(room.tags or "", tag) ~= nil
+  return room._mapper_tags[tag]
 end
 
 
 local function is_room_flagged_as(uid, flag)
-  local flags = (cached_room(uid) or {}).flags
-  return string.find(flags or "", flag)
+  local room = cached_room(uid) or {}
+  if flag == "PK" then
+    return room._mapper_flags.pk
+  elseif flag == "player%-kill%-" then
+    return room._mapper_flags.player_kill
+  elseif flag == "grapple%-required" then
+    return room._mapper_flags.grapple_required
+  end
+
+  room._mapper_flags[flag] = string.find(room.flags or "", flag) ~= nil
+  return room._mapper_flags[flag]
 end
 
 
@@ -1042,11 +1080,18 @@ local direction_order = {
   sw = 10, southwest = 10,
 }
 
+local sorted_directions_cache = setmetatable({}, { __mode = "k" })
+
 local function direction_rank (dir)
   return direction_order [dir] or direction_order [shorten_direction [dir]] or 1000
 end -- direction_rank
 
 local function sort_directions (exits)
+  local cached = sorted_directions_cache [exits]
+  if cached then
+    return cached
+  end
+
   local dirs = {}
   for dir in pairs (exits) do
     table.insert (dirs, dir)
@@ -1061,6 +1106,7 @@ local function sort_directions (exits)
     return arank < brank
   end)
 
+  sorted_directions_cache [exits] = dirs
   return dirs
 end -- sort_directions
 
