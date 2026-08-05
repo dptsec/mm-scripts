@@ -2463,6 +2463,37 @@ function pause_speedwalk ()
   SetStatus ("Speedwalk paused")
 end -- pause_speedwalk
 
+-- resume a speedwalk previously frozen by pause_speedwalk
+
+function resume_speedwalk ()
+  if not check_connected () then
+    return
+  end -- if
+
+  if remaining_speedwalk_steps () > 0 then
+    mapprint ("You are already speedwalking! (Ctrl + LH-click on any room to cancel)")
+    return
+  end -- if
+
+  if not paused_speedwalk then
+    mapprint ("No paused speedwalk.")
+    return
+  end -- if
+
+  if current_room ~= paused_speedwalk.room then
+    mapprint (string.format (
+      "You are in room %s but the speedwalk was paused in room %s. Speedwalk cancelled.",
+      tostring (current_room or "<unknown>"),
+      tostring (paused_speedwalk.room)))
+    paused_speedwalk = nil
+    return
+  end -- if the player moved while paused
+
+  local steps = paused_speedwalk.steps
+  paused_speedwalk = nil
+  start_speedwalk (steps)
+end -- resume_speedwalk
+
 
 
 -- ------------------------------------------------------------------

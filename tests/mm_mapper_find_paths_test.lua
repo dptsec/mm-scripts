@@ -953,6 +953,67 @@ tests[#tests + 1] = {
 }
 
 tests[#tests + 1] = {
+  name = "resume_speedwalk_continues_from_frozen_room",
+  run = function()
+  local graph = {
+    A = { exits = { east = "B" } },
+    B = { exits = { east = "C" } },
+    C = { exits = { east = "D" } },
+    D = { exits = {} },
+  }
+  executed_commands = {}
+  init_mapper_for_speedwalk(graph, nil)
+
+  mapper.draw("A")
+  mapper.start_speedwalk({
+    { dir = "east", uid = "B" },
+    { dir = "east", uid = "C" },
+    { dir = "east", uid = "D" },
+  })
+  mapper.pause_speedwalk()
+  mapper.draw("B")
+
+  mapper.resume_speedwalk()
+  assert_equal(executed_commands[2], "east", "walk resumes with next step")
+
+  mapper.draw("C")
+  assert_equal(executed_commands[3], "east", "continues to following step")
+  mapper.draw("D")
+  assert_equal(executed_commands[4], nil, "walk completed without extra commands")
+  end,
+}
+
+tests[#tests + 1] = {
+  name = "resume_speedwalk_after_moving_refuses_and_drops_snapshot",
+  run = function()
+  local graph = {
+    A = { exits = { east = "B", south = "X" } },
+    B = { exits = { east = "C" } },
+    C = { exits = {} },
+    X = { exits = {} },
+  }
+  executed_commands = {}
+  init_mapper_for_speedwalk(graph, nil)
+
+  mapper.draw("A")
+  mapper.start_speedwalk({
+    { dir = "east", uid = "B" },
+    { dir = "east", uid = "C" },
+  })
+  mapper.pause_speedwalk()
+  mapper.draw("B")
+
+  mapper.draw("X")
+  mapper.resume_speedwalk()
+  assert_equal(executed_commands[2], nil, "refused resume sends nothing")
+
+  mapper.draw("B")
+  mapper.resume_speedwalk()
+  assert_equal(executed_commands[2], nil, "snapshot was dropped by the refused resume")
+  end,
+}
+
+tests[#tests + 1] = {
   name = "map_rendering_uses_batch_room_loader",
   run = function()
   local graph = {
