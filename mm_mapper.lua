@@ -167,6 +167,7 @@ local locked
 
 -- our copy of rooms info
 local rooms = {}
+local path_rooms = {}
 local missing_rooms = {}
 local exact_path_forward_exits = {}
 local exact_path_reverse_exits = {}
@@ -181,7 +182,7 @@ local total_times_drawn = 0
 local total_time_taken = 0
 
 local function reset_path_caches ()
-  rooms = {}
+  path_rooms = {}
   missing_rooms = {}
   exact_path_forward_exits = {}
   exact_path_reverse_exits = {}
@@ -341,6 +342,14 @@ local function get_room (uid)
 end -- get_room
 
 local function cached_room (uid)
+  if rooms [uid] then
+    return rooms [uid]
+  end
+
+  if path_rooms [uid] then
+    return path_rooms [uid]
+  end
+
   if not rooms [uid] then
     rooms [uid] = get_room (uid)
   end -- if not in memory yet
@@ -400,8 +409,13 @@ local function prepare_draw_generation (generation)
 end -- prepare_draw_generation
 
 local function cached_path_room (uid)
-  if rooms [uid] then
-    return rooms [uid]
+  if path_rooms [uid] then
+    return path_rooms [uid]
+  end -- if already in path cache
+
+  if rooms [uid] and not rooms [uid].unknown then
+    path_rooms [uid] = rooms [uid]
+    return path_rooms [uid]
   end -- if already in memory
 
   if missing_rooms [uid] then
@@ -411,8 +425,8 @@ local function cached_path_room (uid)
   local loader = supplied_get_room_for_path or supplied_get_room
   local room = loader (uid)
   if room then
-    rooms [uid] = normalize_room (uid, room)
-    return rooms [uid]
+    path_rooms [uid] = normalize_room (uid, room)
+    return path_rooms [uid]
   end -- if found
 
   missing_rooms [uid] = true
@@ -424,7 +438,7 @@ local function ensure_path_rooms (uids)
   local seen = {}
 
   for _, uid in ipairs (uids) do
-    if (not rooms [uid]) and (not missing_rooms [uid]) and (not seen [uid]) then
+    if (not path_rooms [uid]) and (not missing_rooms [uid]) and (not seen [uid]) then
       table.insert(missing, uid)
       seen [uid] = true
     end -- if room needs loading
@@ -439,7 +453,7 @@ local function ensure_path_rooms (uids)
     for _, uid in ipairs (missing) do
       local room = batch [uid] or batch [tostring(uid)]
       if room then
-        rooms [uid] = normalize_room (uid, room)
+        path_rooms [uid] = normalize_room (uid, room)
       else
         missing_rooms [uid] = true
       end -- if found
@@ -1392,10 +1406,10 @@ function find_paths (uid, f)
       cached_path_room (current_uid)
 
       -- if room doesn't exist, forget it
-      if rooms [current_uid] then
+      if path_rooms [current_uid] then
 
         -- get a list of exits from the current room
-        local exits = rooms [current_uid].exits
+        local exits = path_rooms [current_uid].exits
 
         -- create one new particle for each exit
         for _, dir in ipairs(sort_directions(exits)) do
@@ -1461,8 +1475,8 @@ function find_path (uid, target_uid)
 
   ensure_path_rooms { uid, target_uid }
 
-  local start_room = rooms [uid]
-  local target_room = rooms [target_uid]
+  local start_room = path_rooms [uid]
+  local target_room = path_rooms [target_uid]
   if not start_room or not target_room then
     return nil, 0, 0
   end -- missing endpoint
@@ -1492,7 +1506,7 @@ function find_path (uid, target_uid)
       ensure_sorted_forward_exits_for_exact_path (forward_generation)
 
       for _, current_uid in ipairs (forward_generation) do
-        if rooms [current_uid] then
+        if path_rooms [current_uid] then
           for _, exit in ipairs(get_sorted_forward_exits_for_exact_path (current_uid)) do
             local dest = exit.uid
             if not forward_seen [dest]
@@ -1509,13 +1523,13 @@ function find_path (uid, target_uid)
 
       for _, current_uid in ipairs (forward_generation) do
         count = count + 1
-        if rooms [current_uid] then
+        if path_rooms [current_uid] then
           for _, exit in ipairs(get_sorted_forward_exits_for_exact_path (current_uid)) do
             local dir = exit.dir
             local dest = exit.uid
             if not forward_seen [dest]
             and can_exit_be_used_on_speedwalks(current_uid, dir) then
-              if rooms [dest] and room_can_be_path_step (dest) then
+              if path_rooms [dest] and room_can_be_path_step (dest) then
                 forward_seen [dest] = true
                 previous_forward [dest] = { from = current_uid, dir = dir }
 
@@ -1545,7 +1559,7 @@ function find_path (uid, target_uid)
       ensure_sorted_reverse_exits_for_exact_path (backward_generation)
 
       for _, current_uid in ipairs (backward_generation) do
-        if rooms [current_uid] and room_can_be_path_step (current_uid) then
+        if path_rooms [current_uid] and room_can_be_path_step (current_uid) then
           for _, reverse_exit in ipairs (get_sorted_reverse_exits_for_exact_path (current_uid)) do
             local fromuid = tostring(reverse_exit.fromuid)
             if not backward_seen [fromuid]
@@ -1561,7 +1575,7 @@ function find_path (uid, target_uid)
 
       for _, current_uid in ipairs (backward_generation) do
         count = count + 1
-        if rooms [current_uid] and room_can_be_path_step (current_uid) then
+        if path_rooms [current_uid] and room_can_be_path_step (current_uid) then
           local reverse_exits = get_sorted_reverse_exits_for_exact_path (current_uid)
 
           for _, reverse_exit in ipairs (reverse_exits) do
@@ -1569,7 +1583,7 @@ function find_path (uid, target_uid)
             local dir = reverse_exit.dir
             if not backward_seen [fromuid]
             and can_exit_be_used_on_speedwalks(fromuid, dir) then
-              if rooms [fromuid] and (fromuid == uid or room_can_be_path_step (fromuid)) then
+              if path_rooms [fromuid] and (fromuid == uid or room_can_be_path_step (fromuid)) then
                 backward_seen [fromuid] = true
                 next_backward [fromuid] = { to = current_uid, dir = dir }
 
@@ -1847,6 +1861,7 @@ local credits = {
 function init (t)
 
   reset_path_caches ()
+  rooms = {}
   path_cache_generation = nil
 
   -- make copy of colours, sizes etc.
@@ -2081,7 +2096,7 @@ function find (f, show_uid, expected_count, walk, fcb)
 
   if found_count == 1 and walk then
     uid, item = next (paths, nil)
-    mapprint ("Walking to:", rooms [uid].name)
+    mapprint ("Walking to:", path_rooms [uid].name)
     start_speedwalk (item.path)
     return
   end -- if walking wanted
@@ -2092,9 +2107,9 @@ function find (f, show_uid, expected_count, walk, fcb)
   hyperlink_paths = {}
 
   for _, uid in ipairs (t) do
-    local room = rooms [uid] -- ought to exist or wouldn't be in table
+    local room = path_rooms [uid] -- ought to exist or wouldn't be in table
 
-    assert (room, "Room " .. uid .. " is not in rooms table.")
+    assert (room, "Room " .. uid .. " is not in path_rooms table.")
 
     if current_room == uid then
       mapprint (room.name, "is the room you are in")

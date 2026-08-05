@@ -807,6 +807,56 @@ tests[#tests + 1] = {
   end,
 }
 
+tests[#tests + 1] = {
+  name = "path_room_cache_survives_map_redraw",
+  run = function()
+  local graph = {
+    S = { exits = { east = "A" } },
+    A = { exits = { east = "T" } },
+    T = { exits = {} },
+  }
+  local path_room_calls = 0
+
+  mapper.init {
+    config = {
+      SCAN = { depth = 20 },
+      FONT = { name = "Arial", size = 8 },
+      WINDOW = { width = 100, height = 100 },
+    },
+    get_room = function(uid)
+      return clone_room(uid, graph[uid])
+    end,
+    get_room_for_path = function(uid)
+      path_room_calls = path_room_calls + 1
+      return clone_room(uid, graph[uid])
+    end,
+    show_help = noop,
+    room_click = noop,
+    room_mouseover = noop,
+    room_cancelmouseover = noop,
+    timing = false,
+    show_completed = false,
+    show_other_areas = true,
+    show_up_down = true,
+    show_area_exits = false,
+    use_nospeed_mode = true,
+    use_grappling_mode = true,
+    safewalk_mode = false,
+    speedwalk_prefix = "",
+  }
+
+  local function target(uid)
+    return uid == "T", uid == "T"
+  end
+
+  mapper.find_paths("S", target)
+  mapper.draw("S")
+  mapper.find_paths("S", target)
+
+  assert_equal(path_room_calls, 3, "path room loader calls after redraw")
+  end,
+}
+
 local failures = 0
 
 for _, test in ipairs(tests) do
