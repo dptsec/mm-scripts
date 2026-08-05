@@ -857,6 +857,21 @@ tests[#tests + 1] = {
   end,
 }
 
+tests[#tests + 1] = {
+  name = "speedwalk_builder_preserves_format_without_mutating_path",
+  run = function()
+  local path = {
+    { dir = "e", uid = "A" },
+    { dir = "e", uid = "B" },
+    { dir = "sw", uid = "C" },
+  }
+
+  assert_equal(mapper.build_speedwalk(path), "2e (sw) ", "speedwalk string")
+  assert_equal(#path, 3, "speedwalk path length")
+  assert_equal(path[1].dir, "e", "speedwalk path first direction")
+  end,
+}
+
 local failures = 0
 
 for _, test in ipairs(tests) do

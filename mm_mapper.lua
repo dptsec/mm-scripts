@@ -161,6 +161,22 @@ local current_room
 -- next direction in a speedwalk
 local next_dir
 local next_speedwalk_dir
+local speedwalk_index
+
+local function remaining_speedwalk_steps ()
+  if not current_speedwalk then
+    return 0
+  end
+
+  return math.max (0, #current_speedwalk - (speedwalk_index or 1) + 1)
+end
+
+local function take_next_speedwalk_step ()
+  local index = speedwalk_index or 1
+  local dir = current_speedwalk [index]
+  speedwalk_index = index + 1
+  return dir
+end
 
 -- locked door detected during a speedwalk
 local locked
@@ -1238,7 +1254,7 @@ local function changed_room (uid)
           expected_uid = expected_room,
           actual_uid = uid,
           destination_uid = last_speedwalk_uid,
-          remaining = current_speedwalk and #current_speedwalk or 0,
+          remaining = remaining_speedwalk_steps (),
         })
         if ok and type(handled) == "string" and handled ~= "" then
           recovery_dir = handled
@@ -1267,8 +1283,8 @@ local function changed_room (uid)
       cancel_speedwalk ()
 
     else
-      if #current_speedwalk > 0 then
-        local dir = table.remove (current_speedwalk, 1)
+      if remaining_speedwalk_steps () > 0 then
+        local dir = take_next_speedwalk_step ()
         next_speedwalk_dir = dir.dir
         next_dir = (expand_direction[dir.dir] or dir.dir)
 
@@ -1279,7 +1295,7 @@ local function changed_room (uid)
         if (dir) then
           SetStatus ("Walking " .. (expand_direction[dir.dir] or dir.dir) ..
                      " to " .. walk_to_room_name ..
-                     ". Speedwalks to go: " .. #current_speedwalk + 1)
+                     ". Speedwalks to go: " .. remaining_speedwalk_steps () + 1)
           expected_room = dir.uid
           if config.DELAY.time > 0 then
             if GetOption ("enable_timers") ~= 1 then
@@ -2184,39 +2200,44 @@ function build_speedwalk (path)
 
  -- build speedwalk string (collect identical directions)
   local tspeed = {}
-  for _, dir in ipairs (path) do
-    local n = #tspeed
-    if n == 0 then
-      table.insert (tspeed, { dir = dir.dir, count = 1 })
+  local last_dir
+  local count = 0
+
+  local function append_direction ()
+    if not last_dir then
+      return
+    end
+
+    local token = ""
+    if count > 1 then
+      token = token .. count
+    end
+    if #last_dir == 1 then
+      token = token .. last_dir
     else
-      if tspeed [n].dir == dir.dir then
-        tspeed [n].count = tspeed [n].count + 1
-      else
-        table.insert (tspeed, { dir = dir.dir, count = 1 })
-      end -- if different direction
-    end -- if
+      token = token .. "(" .. last_dir .. ")"
+    end
+    tspeed [#tspeed + 1] = token
+  end
+
+  for _, dir in ipairs (path) do
+    if last_dir == dir.dir then
+      count = count + 1
+    else
+      append_direction ()
+      last_dir = dir.dir
+      count = 1
+    end
   end -- for
+
+  append_direction ()
 
   if #tspeed == 0 then
     return
   end -- nowhere to go (current room?)
 
   -- now build string like: 2n3e4(sw)
-  local s = ""
-
-  for _, dir in ipairs (tspeed) do
-    if dir.count > 1 then
-      s = s .. dir.count
-    end -- if
-    if #dir.dir == 1 then
-      s = s .. dir.dir
-    else
-      s = s .. "(" .. dir.dir .. ")"
-    end -- if
-    s = s .. " "
-  end -- if
-
-  return s
+  return table.concat (tspeed, " ") .. " "
 
 end -- build_speedwalk
 
@@ -2229,12 +2250,13 @@ function start_speedwalk (path)
     return
   end -- if
 
-  if current_speedwalk and #current_speedwalk > 0 then
+  if remaining_speedwalk_steps () > 0 then
     mapprint ("You are already speedwalking! (Ctrl + LH-click on any room to cancel)")
     return
   end -- if
 
   current_speedwalk = path
+  speedwalk_index = 1
 
   if current_speedwalk then
     if #current_speedwalk > 0 then
@@ -2245,12 +2267,13 @@ function start_speedwalk (path)
         local s = speedwalk_prefix .. " " .. build_speedwalk (path)
         Execute (s)
         current_speedwalk = nil
+        speedwalk_index = nil
         return
       end -- if
 
       BroadcastPlugin(1, "speedwalking")
 
-      local dir = table.remove (current_speedwalk, 1)
+      local dir = take_next_speedwalk_step ()
       next_speedwalk_dir = dir.dir
 
       next_dir = (expand_direction [dir.dir] or dir.dir)
@@ -2265,7 +2288,7 @@ function start_speedwalk (path)
       walk_to_room_name = room.name
       SetStatus ("Walking " .. (expand_direction [dir.dir] or dir.dir) ..
                  " to " .. walk_to_room_name ..
-                 ". Speedwalks to go: " .. #current_speedwalk + 1)
+                 ". Speedwalks to go: " .. remaining_speedwalk_steps () + 1)
       Execute (dir.dir)
       expected_room = dir.uid
     else
@@ -2283,10 +2306,11 @@ function cancel_speedwalk (reason)
   if (reason) then
     msg = msg .. " - reason: " .. reason
   end
-  if current_speedwalk and #current_speedwalk > 0 then
+  if remaining_speedwalk_steps () > 0 then
     mapprint (msg)
   end -- if
   current_speedwalk = nil
+  speedwalk_index = nil
   expected_room = nil
   hyperlink_paths = nil
   next_dir = nil
