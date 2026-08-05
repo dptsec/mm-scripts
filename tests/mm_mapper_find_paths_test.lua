@@ -912,6 +912,47 @@ tests[#tests + 1] = {
 }
 
 tests[#tests + 1] = {
+  name = "pause_speedwalk_stops_sending_steps_after_inflight_step_lands",
+  run = function()
+  local graph = {
+    A = { exits = { east = "B" } },
+    B = { exits = { east = "C" } },
+    C = { exits = { east = "D" } },
+    D = { exits = {} },
+  }
+  executed_commands = {}
+  init_mapper_for_speedwalk(graph, nil)
+
+  mapper.draw("A")
+  mapper.start_speedwalk({
+    { dir = "east", uid = "B" },
+    { dir = "east", uid = "C" },
+    { dir = "east", uid = "D" },
+  })
+  assert_equal(executed_commands[1], "east", "first step")
+
+  mapper.pause_speedwalk()
+  mapper.draw("B")
+  assert_equal(executed_commands[2], nil, "no further steps while paused")
+  end,
+}
+
+tests[#tests + 1] = {
+  name = "pause_speedwalk_without_active_walk_is_a_noop",
+  run = function()
+  local graph = {
+    A = { exits = {} },
+  }
+  executed_commands = {}
+  init_mapper_for_speedwalk(graph, nil)
+
+  mapper.draw("A")
+  mapper.pause_speedwalk()
+  assert_equal(executed_commands[1], nil, "no commands sent")
+  end,
+}
+
+tests[#tests + 1] = {
   name = "map_rendering_uses_batch_room_loader",
   run = function()
   local graph = {

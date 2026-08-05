@@ -117,6 +117,7 @@ PATHFINDER_FEATURES = {
   batch_room_loader = true,
   batch_draw_room_loader = true,
   deferred_speedwalk_recovery = true,
+  speedwalk_pause = true,
 }
 
 require "movewindow"
@@ -164,6 +165,7 @@ local next_dir
 local next_speedwalk_dir
 local speedwalk_index
 local deferred_speedwalk_mismatch
+local paused_speedwalk
 
 -- Returned by the mismatch callback when the mapper should wait briefly for
 -- a second game message (for example, the text describing a crosswind).
@@ -1984,6 +1986,7 @@ function init (t)
   rooms = {}
   path_cache_generation = nil
   deferred_speedwalk_mismatch = nil
+  paused_speedwalk = nil
 
   -- make copy of colours, sizes etc.
   config = t.config
@@ -2406,14 +2409,7 @@ end -- start_speedwalk
 
 -- cancel the current speedwalk
 
-function cancel_speedwalk (reason)
-  local msg = "Speedwalk cancelled."
-  if (reason) then
-    msg = msg .. " - reason: " .. reason
-  end
-  if remaining_speedwalk_steps () > 0 then
-    mapprint (msg)
-  end -- if
+local function reset_speedwalk_state ()
   current_speedwalk = nil
   deferred_speedwalk_mismatch = nil
   speedwalk_index = nil
@@ -2423,7 +2419,49 @@ function cancel_speedwalk (reason)
   next_speedwalk_dir = nil
   SetStatus ("Ready")
   BroadcastPlugin(1, "done")
+end -- reset_speedwalk_state
+
+function cancel_speedwalk (reason)
+  local msg = "Speedwalk cancelled."
+  if (reason) then
+    msg = msg .. " - reason: " .. reason
+  end
+  if remaining_speedwalk_steps () > 0 then
+    mapprint (msg)
+  end -- if
+  paused_speedwalk = nil
+  reset_speedwalk_state ()
 end -- cancel_speedwalk
+
+-- pause the current speedwalk so it can be resumed with resume_speedwalk
+
+function pause_speedwalk ()
+  if remaining_speedwalk_steps () == 0 then
+    if paused_speedwalk then
+      mapprint ("Speedwalk already paused. Type 'mapper resume' to continue.")
+    elseif expected_room then
+      mapprint ("Speedwalk is on its final step; letting it finish.")
+    else
+      mapprint ("No speedwalk in progress.")
+    end
+    return
+  end -- if nothing left to freeze
+
+  local steps = {}
+  for index = speedwalk_index or 1, #current_speedwalk do
+    table.insert (steps, current_speedwalk [index])
+  end -- for
+
+  local room = expected_room
+  reset_speedwalk_state ()
+  paused_speedwalk = { room = room, steps = steps }
+
+  mapprint (string.format (
+    "Speedwalk paused (%d step%s remaining). Type 'mapper resume' to continue.",
+    #steps,
+    #steps == 1 and "" or "s"))
+  SetStatus ("Speedwalk paused")
+end -- pause_speedwalk
 
 
 
