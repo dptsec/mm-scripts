@@ -1043,6 +1043,7 @@ function OnPluginInstall()
     end
 
     create_tables()    -- create database structure if necessary
+    ensure_active_exits()
 
     Tell("-- " .. GetPluginInfo(GetPluginID(), 1) .. ": type ")
     ColourTell("silver", "black", GetPluginInfo(GetPluginID(), 1) .. " help")
@@ -1952,16 +1953,8 @@ end
 function latest_exits_where(where)
   return string.format([[
     SELECT e.fromuid, e.dir, e.touid
-      FROM exits e
+      FROM active_exits e
       WHERE %s
-        AND e.rowid = (
-          SELECT e2.rowid
-            FROM exits e2
-            WHERE e2.fromuid = e.fromuid
-              AND e2.dir = e.dir
-            ORDER BY DATETIME(e2.date_added) DESC, e2.rowid DESC
-            LIMIT 1
-        )
   ]], where)
 end
 
@@ -3759,6 +3752,35 @@ function mapper_meta_set(use_db, key, value)
 end
 
 
+function rebuild_active_exits(use_db)
+  dbcheck(use_db:execute("DELETE FROM active_exits;"))
+  dbcheck(use_db:execute([[
+    INSERT INTO active_exits(dir, fromuid, touid, date_added)
+      SELECT e.dir, e.fromuid, e.touid, e.date_added
+        FROM exits e
+       WHERE e.rowid = (
+         SELECT e2.rowid
+           FROM exits e2
+          WHERE e2.fromuid = e.fromuid AND e2.dir = e.dir
+          ORDER BY DATETIME(e2.date_added) DESC, e2.rowid DESC
+          LIMIT 1
+       );
+  ]]))
+  mapper_meta_set(use_db, "active_exits_ready", "1")
+end
+
+
+function ensure_active_exits()
+  if (mapper_meta_get(db, "active_exits_ready") == "1") then
+    return
+  end
+
+  dbcheck(db:execute("BEGIN TRANSACTION;"))
+  rebuild_active_exits(db)
+  dbcheck(db:execute("COMMIT;"))
+end
+
+
 function insert_rooms_lookup_row(use_db, uid, name, column, value)
   if is_integer_uid(uid) then
     dbcheck(use_db:execute(string.format(
@@ -3911,6 +3933,55 @@ function create_tables_new(use_db)
     CREATE INDEX IF NOT EXISTS exits_touid_fromuid_dir_index ON exits(touid, fromuid, dir);
     CREATE INDEX IF NOT EXISTS player_tags_uid_index ON player_tags(uid);
     CREATE INDEX IF NOT EXISTS exits_tags_fromuid_dir_index ON exits_tags(fromuid, dir);
+
+    CREATE TABLE IF NOT EXISTS active_exits(
+      dir           TEXT NOT NULL,
+      fromuid       TEXT NOT NULL,
+      touid         TEXT NOT NULL,
+      date_added    DATE,
+      PRIMARY KEY(fromuid, dir)
+    );
+    CREATE INDEX IF NOT EXISTS active_exits_touid_fromuid_dir_index ON active_exits(touid, fromuid, dir);
+
+    CREATE TRIGGER IF NOT EXISTS exits_active_insert
+      AFTER INSERT ON exits
+      BEGIN
+        INSERT OR REPLACE INTO active_exits(dir, fromuid, touid, date_added)
+        VALUES(NEW.dir, NEW.fromuid, NEW.touid, NEW.date_added);
+      END;
+
+    CREATE TRIGGER IF NOT EXISTS exits_active_update
+      AFTER UPDATE ON exits
+      BEGIN
+        DELETE FROM active_exits
+          WHERE fromuid = OLD.fromuid AND dir = OLD.dir;
+        INSERT OR REPLACE INTO active_exits(dir, fromuid, touid, date_added)
+          SELECT dir, fromuid, touid, date_added
+            FROM exits
+           WHERE rowid = (
+             SELECT rowid FROM exits
+              WHERE fromuid = NEW.fromuid AND dir = NEW.dir
+              ORDER BY DATETIME(date_added) DESC, rowid DESC
+              LIMIT 1
+           );
+      END;
+
+    CREATE TRIGGER IF NOT EXISTS exits_active_delete
+      AFTER DELETE ON exits
+      BEGIN
+        DELETE FROM active_exits
+          WHERE fromuid = OLD.fromuid AND dir = OLD.dir;
+        INSERT OR REPLACE INTO active_exits(dir, fromuid, touid, date_added)
+          SELECT dir, fromuid, touid, date_added
+            FROM exits
+           WHERE rowid = (
+             SELECT rowid FROM exits
+              WHERE fromuid = OLD.fromuid AND dir = OLD.dir
+              ORDER BY DATETIME(date_added) DESC, rowid DESC
+              LIMIT 1
+           );
+      END;
+
   ]])
 end
 
@@ -3959,6 +4030,54 @@ function create_tables_compatibility(use_db)
     CREATE INDEX IF NOT EXISTS exits_fromuid_dir_date_index ON exits(fromuid, dir, date_added DESC);
     CREATE INDEX IF NOT EXISTS exits_fromuid_dir_touid_index ON exits(fromuid, dir, touid);
     CREATE INDEX IF NOT EXISTS exits_touid_fromuid_dir_index ON exits(touid, fromuid, dir);
+
+    CREATE TABLE IF NOT EXISTS active_exits(
+      dir           TEXT NOT NULL,
+      fromuid       TEXT NOT NULL,
+      touid         TEXT NOT NULL,
+      date_added    DATE,
+      PRIMARY KEY(fromuid, dir)
+    );
+    CREATE INDEX IF NOT EXISTS active_exits_touid_fromuid_dir_index ON active_exits(touid, fromuid, dir);
+
+    CREATE TRIGGER IF NOT EXISTS exits_active_insert
+      AFTER INSERT ON exits
+      BEGIN
+        INSERT OR REPLACE INTO active_exits(dir, fromuid, touid, date_added)
+        VALUES(NEW.dir, NEW.fromuid, NEW.touid, NEW.date_added);
+      END;
+
+    CREATE TRIGGER IF NOT EXISTS exits_active_update
+      AFTER UPDATE ON exits
+      BEGIN
+        DELETE FROM active_exits
+          WHERE fromuid = OLD.fromuid AND dir = OLD.dir;
+        INSERT OR REPLACE INTO active_exits(dir, fromuid, touid, date_added)
+          SELECT dir, fromuid, touid, date_added
+            FROM exits
+           WHERE rowid = (
+             SELECT rowid FROM exits
+              WHERE fromuid = NEW.fromuid AND dir = NEW.dir
+              ORDER BY DATETIME(date_added) DESC, rowid DESC
+              LIMIT 1
+           );
+      END;
+
+    CREATE TRIGGER IF NOT EXISTS exits_active_delete
+      AFTER DELETE ON exits
+      BEGIN
+        DELETE FROM active_exits
+          WHERE fromuid = OLD.fromuid AND dir = OLD.dir;
+        INSERT OR REPLACE INTO active_exits(dir, fromuid, touid, date_added)
+          SELECT dir, fromuid, touid, date_added
+            FROM exits
+           WHERE rowid = (
+             SELECT rowid FROM exits
+              WHERE fromuid = OLD.fromuid AND dir = OLD.dir
+              ORDER BY DATETIME(date_added) DESC, rowid DESC
+              LIMIT 1
+           );
+      END;
 
     CREATE TABLE IF NOT EXISTS mapper_meta(
       key           TEXT NOT NULL UNIQUE,
@@ -5919,6 +6038,8 @@ function recreate_database(name, line, wildcards)
         fixsql(row.date_added)
     )))
   end
+
+  rebuild_active_exits(dbnew)
 
   SetStatus("Committing changes...")
 
