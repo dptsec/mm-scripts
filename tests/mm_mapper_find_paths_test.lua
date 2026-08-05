@@ -757,6 +757,56 @@ tests[#tests + 1] = {
   end,
 }
 
+tests[#tests + 1] = {
+  name = "map_rendering_uses_batch_room_loader",
+  run = function()
+  local graph = {
+    S = { exits = { east = "A" } },
+    A = { exits = {} },
+  }
+  local full_room_calls = 0
+  local batch_calls = 0
+
+  mapper.init {
+    config = {
+      SCAN = { depth = 20 },
+      FONT = { name = "Arial", size = 8 },
+      WINDOW = { width = 100, height = 100 },
+    },
+    get_room = function(uid)
+      full_room_calls = full_room_calls + 1
+      return clone_room(uid, graph[uid])
+    end,
+    get_rooms_for_draw_batch = function(uids)
+      batch_calls = batch_calls + 1
+      local batch = {}
+      for _, uid in ipairs(uids) do
+        batch[uid] = clone_room(uid, graph[uid])
+      end
+      return batch
+    end,
+    show_help = noop,
+    room_click = noop,
+    room_mouseover = noop,
+    room_cancelmouseover = noop,
+    timing = false,
+    show_completed = false,
+    show_other_areas = true,
+    show_up_down = true,
+    show_area_exits = false,
+    use_nospeed_mode = true,
+    use_grappling_mode = true,
+    safewalk_mode = false,
+    speedwalk_prefix = "",
+  }
+
+  mapper.draw("S")
+
+  assert_equal(batch_calls, 1, "draw batch loader calls")
+  assert_equal(full_room_calls, 1, "full room loader calls")
+  end,
+}
+
 local failures = 0
 
 for _, test in ipairs(tests) do

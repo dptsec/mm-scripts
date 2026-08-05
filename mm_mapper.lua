@@ -115,6 +115,7 @@ PATHFINDER_FEATURES = {
   exact_path = true,
   batch_exit_loaders = true,
   batch_room_loader = true,
+  batch_draw_room_loader = true,
 }
 
 require "movewindow"
@@ -134,6 +135,7 @@ local DISTANCE_TO_NEXT_ROOM = 15
 -- supplied in init
 local config  -- configuration table
 local supplied_get_room
+local supplied_get_rooms_for_draw_batch
 local supplied_get_room_for_path
 local supplied_get_rooms_for_path_batch
 local supplied_get_reverse_exits
@@ -345,6 +347,57 @@ local function cached_room (uid)
 
   return rooms [uid]
 end -- cached_room
+
+local function ensure_draw_rooms (uids)
+  local missing = {}
+  local seen = {}
+
+  for _, uid in ipairs (uids) do
+    if (not rooms [uid]) and (not seen [uid]) then
+      table.insert (missing, uid)
+      seen [uid] = true
+    end -- if room needs loading
+  end -- for
+
+  if #missing == 0 then
+    return
+  end -- nothing to load
+
+  if supplied_get_rooms_for_draw_batch then
+    local batch = supplied_get_rooms_for_draw_batch (missing) or {}
+    for _, uid in ipairs (missing) do
+      local room = batch [uid] or batch [tostring (uid)]
+      rooms [uid] = normalize_room (uid, room)
+    end -- for
+    return
+  end -- if batch room loader available
+
+  for _, uid in ipairs (missing) do
+    rooms [uid] = get_room (uid)
+  end -- for
+end -- ensure_draw_rooms
+
+local function prepare_draw_generation (generation)
+  local room_uids = {}
+
+  for _, part in ipairs (generation) do
+    table.insert (room_uids, part.uid)
+  end -- for each room to draw
+
+  ensure_draw_rooms (room_uids)
+
+  local exit_uids = {}
+  for _, part in ipairs (generation) do
+    local room = rooms [part.uid]
+    if room then
+      for _, exit_uid in pairs (room.exits) do
+        table.insert (exit_uids, exit_uid)
+      end -- for each exit
+    end -- if room loaded
+  end -- for each room to draw
+
+  ensure_draw_rooms (exit_uids)
+end -- prepare_draw_generation
 
 local function cached_path_room (uid)
   if rooms [uid] then
@@ -1645,6 +1698,7 @@ function draw (uid)
   while #rooms_to_be_drawn > 0 and depth < config.SCAN.depth do
     local old_generation = rooms_to_be_drawn
     rooms_to_be_drawn = {}  -- new generation
+    prepare_draw_generation (old_generation)
     for i, part in ipairs (old_generation) do
       draw_room (part.uid, part.path, part.x, part.y)
     end -- for each existing room
@@ -1801,6 +1855,10 @@ function init (t)
 
   supplied_get_room = t.get_room
   assert (type (supplied_get_room) == "function", "No 'get_room' function supplied to mapper.")
+  supplied_get_rooms_for_draw_batch = t.get_rooms_for_draw_batch
+  if supplied_get_rooms_for_draw_batch then
+    assert (type (supplied_get_rooms_for_draw_batch) == "function", "'get_rooms_for_draw_batch' must be a function.")
+  end -- if batch draw room loader supplied
   supplied_get_room_for_path = t.get_room_for_path
   if supplied_get_room_for_path then
     assert (type (supplied_get_room_for_path) == "function", "'get_room_for_path' must be a function.")
