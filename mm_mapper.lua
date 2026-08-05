@@ -162,6 +162,11 @@ local current_room
 local next_dir
 local next_speedwalk_dir
 local speedwalk_index
+local deferred_speedwalk_mismatch
+
+-- Returned by the mismatch callback when the mapper should wait briefly for
+-- a second game message (for example, the text describing a crosswind).
+SPEEDWALK_MISMATCH_DEFERRED = "__mm_mapper_speedwalk_mismatch_deferred__"
 
 local function remaining_speedwalk_steps ()
   if not current_speedwalk then
@@ -1305,7 +1310,14 @@ local function changed_room (uid)
           remaining = remaining_speedwalk_steps (),
         })
         if ok and type(handled) == "string" and handled ~= "" then
-          recovery_dir = handled
+          if handled == SPEEDWALK_MISMATCH_DEFERRED then
+            deferred_speedwalk_mismatch = {
+              actual_uid = uid,
+              expected_uid = expected_room,
+            }
+          else
+            recovery_dir = handled
+          end
         end -- if caller supplied a recovery direction
         if not ok then
           maperror ("Speedwalk mismatch handler failed: " .. tostring (handled))
@@ -1323,6 +1335,10 @@ local function changed_room (uid)
         return
       end -- if caller supplied a recovery direction
 
+      if deferred_speedwalk_mismatch then
+        return
+      end -- if mismatch recovery is waiting for another game message
+
       maperror (string.format ("Speedwalk failed after sending '%s' from '%s'. Expected to be in '%s' but ended up in '%s'.",
         next_speedwalk_dir or next_dir or "<none>",
         current_room or "<none>",
@@ -1331,6 +1347,7 @@ local function changed_room (uid)
       cancel_speedwalk ()
 
     else
+      deferred_speedwalk_mismatch = nil
       if remaining_speedwalk_steps () > 0 then
         local dir = take_next_speedwalk_step ()
         next_speedwalk_dir = dir.dir
@@ -1406,6 +1423,37 @@ end --  draw_zone_exit
 function get_next_dir()
   return next_dir
 end -- get_next_dir
+
+-- is a speedwalk mismatch waiting for an external recovery message?
+
+function has_deferred_speedwalk_mismatch()
+  return deferred_speedwalk_mismatch ~= nil
+end -- has_deferred_speedwalk_mismatch
+
+-- resume a speedwalk after a delayed forced-movement notification
+
+function resume_speedwalk_recovery(recovery_dir)
+  local mismatch = deferred_speedwalk_mismatch
+  if (not mismatch) or (not current_speedwalk) or (not expected_room) then
+    return false
+  end
+
+  if (type(recovery_dir) ~= "string") or recovery_dir == "" then
+    return false
+  end
+
+  deferred_speedwalk_mismatch = nil
+  next_speedwalk_dir = recovery_dir
+  next_dir = (expand_direction[recovery_dir] or recovery_dir)
+
+  if (not check_if_should_walk(next_dir, expected_room, mismatch.actual_uid)) then
+    return false
+  end
+
+  SetStatus ("Recovering from forced movement: " .. next_dir)
+  Execute (recovery_dir)
+  return true
+end -- resume_speedwalk_recovery
 
 -- can we find another room right now?
 
@@ -1933,6 +1981,7 @@ function init (t)
   reset_path_caches ()
   rooms = {}
   path_cache_generation = nil
+  deferred_speedwalk_mismatch = nil
 
   -- make copy of colours, sizes etc.
   config = t.config
@@ -2364,6 +2413,7 @@ function cancel_speedwalk (reason)
     mapprint (msg)
   end -- if
   current_speedwalk = nil
+  deferred_speedwalk_mismatch = nil
   speedwalk_index = nil
   expected_room = nil
   hyperlink_paths = nil

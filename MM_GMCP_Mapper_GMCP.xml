@@ -954,6 +954,7 @@ local path_room_cache = {
 
 local pending_crosswind = nil
 local crosswind_recovery_window = 5
+local deferred_speedwalk_timeout_token = 0
 local crosswind_return_direction = {
   n = "s",
   north = "s",
@@ -1178,6 +1179,13 @@ function mapper_speedwalk_mismatch(details)
   if recovery_dir then
     return recovery_dir
   end
+
+  if mapper.get_next_dir() and mapper.SPEEDWALK_MISMATCH_DEFERRED then
+    deferred_speedwalk_timeout_token = deferred_speedwalk_timeout_token + 1
+    local token = deferred_speedwalk_timeout_token
+    DoAfterSpecial(0.5, "resolve_deferred_speedwalk_mismatch(" .. tostring(token) .. ")", sendto.script)
+    return mapper.SPEEDWALK_MISMATCH_DEFERRED
+  end
 end
 
 
@@ -1191,6 +1199,30 @@ function on_crosswind_forced_movement(name, line, wildcards)
     direction = wildcards.direction or "?",
     at = utils.timer(),
   }
+
+  if mapper.has_deferred_speedwalk_mismatch() then
+    local crosswind = pending_crosswind
+    pending_crosswind = nil
+    local recovery_dir = crosswind_return_direction[string.lower(tostring(crosswind.direction or ""))]
+    if recovery_dir then
+      mapper.mapprint(string.format(
+        "Crosswind pushed you %s; moving %s to return to the expected room.",
+        tostring(crosswind.direction or "?"),
+        recovery_dir))
+      mapper.resume_speedwalk_recovery(recovery_dir)
+    end
+  end
+end
+
+
+function resolve_deferred_speedwalk_mismatch(token)
+  if tonumber(token) ~= deferred_speedwalk_timeout_token then
+    return
+  end
+
+  if mapper.has_deferred_speedwalk_mismatch() then
+    mapper.cancel_speedwalk("movement mismatch was not identified as a crosswind")
+  end
 end
 
 

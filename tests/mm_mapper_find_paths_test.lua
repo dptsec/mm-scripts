@@ -754,6 +754,7 @@ tests[#tests + 1] = {
   assert_equal(mismatch.dir, "east", "direction")
   assert_equal(mismatch.expected_uid, "A", "expected room")
   assert_equal(mismatch.actual_uid, "B", "actual room")
+  mapper.cancel_speedwalk()
   end,
 }
 
@@ -781,6 +782,34 @@ tests[#tests + 1] = {
   assert_equal(executed_commands[1], "east", "sent command")
   assert_equal(executed_commands[2], "west", "recovery command")
   assert_equal(mapper.get_next_dir(), "west", "recovery direction")
+  mapper.cancel_speedwalk()
+  end,
+}
+
+tests[#tests + 1] = {
+  name = "speedwalk_mismatch_can_wait_for_forced_movement_message",
+  run = function()
+  local graph = {
+    S = { exits = { east = "A" } },
+    A = { exits = {} },
+    B = { exits = { west = "A" } },
+  }
+  executed_commands = {}
+
+  init_mapper_for_speedwalk(graph, function()
+    return mapper.SPEEDWALK_MISMATCH_DEFERRED
+  end)
+
+  mapper.draw("S")
+  mapper.start_speedwalk({ { dir = "east", uid = "A" } })
+  mapper.draw("B")
+
+  assert(mapper.has_deferred_speedwalk_mismatch(), "expected deferred mismatch")
+  assert_equal(executed_commands[2], nil, "recovery should wait for notification")
+  assert(mapper.resume_speedwalk_recovery("west"), "expected recovery to resume")
+  assert_equal(executed_commands[2], "west", "recovery command")
+  assert(not mapper.has_deferred_speedwalk_mismatch(), "expected deferred mismatch to clear")
+  mapper.cancel_speedwalk()
   end,
 }
 
