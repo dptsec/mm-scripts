@@ -1912,6 +1912,7 @@ function get_rooms_for_draw_batch(uids)
   local batch = {}
   local missing = {}
   local seen = {}
+  local wanted = {}
 
   if (#uids == 0) then
     return batch
@@ -1921,83 +1922,89 @@ function get_rooms_for_draw_batch(uids)
 
   for _, uid in ipairs(uids) do
     local key = tostring(uid)
-    if (rooms[key]) then
-      batch[key] = rooms[key]
-    elseif (not room_not_in_database[key]) and (not seen[key]) then
-      missing[#missing + 1] = key
+    if (not seen[key]) then
       seen[key] = true
-    end
-  end
-
-  if (#missing == 0) then
-    return batch
-  end
-
-  local sql = string.format(
-    "SELECT * FROM rooms WHERE uid IN (%s)",
-    make_sql_in_list(missing)
-  )
-
-  local found = {}
-  for row in db:nrows(sql) do
-    local uid = tostring(row.uid)
-    local room = {
-      uid = uid,
-      name = row.name,
-      area = row.area,
-      terrain = row.terrain,
-      terraininfo = row.terraininfo,
-      date_added = row.date_added,
-      exits = {},
-    }
-
-    if (not compatibility) then
-      room.flags = row.flags
-      room.tags = path_room_cache.room_tags[uid]
-      room.exits_tags = path_room_cache.exit_tags[uid] or {}
-
-    else
-      room.flags = row.description
-      room.flags = fix_flag(room.flags, row.safe, "safe")
-      room.flags = fix_flag(room.flags, row.lpk, "LPK", "player-kill-lawful")
-      room.flags = fix_flag(room.flags, row.npk, "NPK", "player-kill-neutral")
-      room.flags = fix_flag(room.flags, row.cpk, "CPK", "player-kill-chaotic")
-
-      room.notes = row.notes
-      room.tags = ""
-      room.tags = fix_tag(room.tags, row.shop, "shop")
-      room.tags = fix_tag(room.tags, row.train, "trainer")
-      room.exits_tags = {}
-    end
-
-    found[uid] = true
-    rooms[uid] = room
-    batch[uid] = room
-  end
-
-  if (not compatibility) then
-    for row in db:nrows(string.format(
-      "SELECT uid, notes FROM bookmarks WHERE uid IN (%s)",
-      make_sql_in_list(missing))) do
-      local uid = tostring(row.uid)
-      if (rooms[uid]) then
-        rooms[uid].notes = row.notes
+      wanted[#wanted + 1] = key
+      if (not rooms[key]) and (not room_not_in_database[key]) then
+        missing[#missing + 1] = key
       end
     end
   end
 
-  for row in db:nrows(latest_exits_where(string.format(
-    "e.fromuid IN (%s)",
-    make_sql_in_list(missing)))) do
-    local uid = tostring(row.fromuid)
-    if (rooms[uid]) then
-      rooms[uid].exits[row.dir] = tostring(row.touid)
+  if (#missing > 0) then
+    local sql = string.format(
+      "SELECT * FROM rooms WHERE uid IN (%s)",
+      make_sql_in_list(missing)
+    )
+
+    local found = {}
+    for row in db:nrows(sql) do
+      local uid = tostring(row.uid)
+      local room = {
+        uid = uid,
+        name = row.name,
+        area = row.area,
+        terrain = row.terrain,
+        terraininfo = row.terraininfo,
+        date_added = row.date_added,
+        exits = {},
+      }
+
+      if (not compatibility) then
+        room.flags = row.flags
+        room.tags = path_room_cache.room_tags[uid]
+        room.exits_tags = path_room_cache.exit_tags[uid] or {}
+
+      else
+        room.flags = row.description
+        room.flags = fix_flag(room.flags, row.safe, "safe")
+        room.flags = fix_flag(room.flags, row.lpk, "LPK", "player-kill-lawful")
+        room.flags = fix_flag(room.flags, row.npk, "NPK", "player-kill-neutral")
+        room.flags = fix_flag(room.flags, row.cpk, "CPK", "player-kill-chaotic")
+
+        room.notes = row.notes
+        room.tags = ""
+        room.tags = fix_tag(room.tags, row.shop, "shop")
+        room.tags = fix_tag(room.tags, row.train, "trainer")
+        room.exits_tags = {}
+      end
+
+      found[uid] = true
+      rooms[uid] = room
+    end
+
+    if (not compatibility) then
+      for row in db:nrows(string.format(
+        "SELECT uid, notes FROM bookmarks WHERE uid IN (%s)",
+        make_sql_in_list(missing))) do
+        local uid = tostring(row.uid)
+        if (rooms[uid]) then
+          rooms[uid].notes = row.notes
+        end
+      end
+    end
+
+    for row in db:nrows(latest_exits_where(string.format(
+      "e.fromuid IN (%s)",
+      make_sql_in_list(missing)))) do
+      local uid = tostring(row.fromuid)
+      if (rooms[uid]) then
+        rooms[uid].exits[row.dir] = tostring(row.touid)
+      end
+    end
+
+    for _, uid in ipairs(missing) do
+      if (not found[uid]) then
+        room_not_in_database[uid] = true
+      end
     end
   end
 
-  for _, uid in ipairs(missing) do
-    if (not found[uid]) then
-      room_not_in_database[uid] = true
+  -- decorate after exits and bookmarks are attached so fills, borders and
+  -- hover messages match what get_room would have produced
+  for _, key in ipairs(wanted) do
+    if (rooms[key]) then
+      batch[key] = decorate_room(key, rooms[key])
     end
   end
 
@@ -2095,11 +2102,20 @@ function get_room(uid)
 
   -- look it up
   local ourroom = rooms[uid] or load_room_from_database(uid)
-  
+
   if (not ourroom) then
     return nil
   end
 
+  return decorate_room(uid, ourroom)
+end
+
+
+-- apply presentation fields (fill/border colours, hover message) to a copy
+-- of a cached room; get_room and get_rooms_for_draw_batch both come through
+-- here so batch-loaded rooms are styled the same as singly loaded ones
+
+function decorate_room(uid, ourroom)
   -- The mapper only mutates top-level presentation fields. A shallow copy
   -- avoids recursively copying exits and tags for every room on every redraw.
   local room = {}
