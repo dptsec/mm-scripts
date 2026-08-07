@@ -167,6 +167,13 @@ local speedwalk_index
 local deferred_speedwalk_mismatch
 local paused_speedwalk
 
+-- Forced-movement recovery is bounded: after this many consecutive
+-- corrections without ever reaching the expected room, the walk cancels
+-- instead of orbiting it forever (stale wilds edges, drifting ships).
+local MAX_SPEEDWALK_RECOVERY_ATTEMPTS = 5
+local speedwalk_recovery_attempts = 0
+local speedwalk_recovery_rooms = {}
+
 -- Returned by the mismatch callback when the mapper should wait briefly for
 -- a second game message (for example, the text describing a crosswind).
 SPEEDWALK_MISMATCH_DEFERRED = "__mm_mapper_speedwalk_mismatch_deferred__"
@@ -1294,6 +1301,31 @@ local function check_if_should_walk(next_dir, next_uid, from_uid)
 end
 
 
+-- account for one forced-movement recovery attempt; cancels the walk and
+-- returns false when the same wrong room comes around again (orbiting) or
+-- the attempt budget is spent. The counters reset whenever a step lands on
+-- the expected room, so only consecutive failed corrections accumulate.
+local function note_speedwalk_recovery_attempt (actual_uid)
+  speedwalk_recovery_attempts = speedwalk_recovery_attempts + 1
+  local revisited = actual_uid and speedwalk_recovery_rooms [actual_uid]
+  if actual_uid then
+    speedwalk_recovery_rooms [actual_uid] = true
+  end -- if
+
+  if revisited then
+    cancel_speedwalk ("forced-movement recovery keeps circling room " .. actual_uid)
+    return false
+  end -- if going in circles
+
+  if speedwalk_recovery_attempts > MAX_SPEEDWALK_RECOVERY_ATTEMPTS then
+    cancel_speedwalk ("gave up after " .. MAX_SPEEDWALK_RECOVERY_ATTEMPTS ..
+      " forced-movement recoveries without reaching the expected room")
+    return false
+  end -- if budget spent
+
+  return true
+end -- note_speedwalk_recovery_attempt
+
 --local function changed_room (uid)
 local function changed_room (uid)
   hyperlink_paths = nil  -- those hyperlinks are meaningless now
@@ -1329,6 +1361,9 @@ local function changed_room (uid)
 
       if recovery_dir then
         deferred_speedwalk_mismatch = nil
+        if (not note_speedwalk_recovery_attempt (uid)) then
+          return
+        end
         next_speedwalk_dir = recovery_dir
         next_dir = (expand_direction[recovery_dir] or recovery_dir)
         if (not check_if_should_walk(next_dir, expected_room, uid)) then
@@ -1352,6 +1387,8 @@ local function changed_room (uid)
 
     else
       deferred_speedwalk_mismatch = nil
+      speedwalk_recovery_attempts = 0
+      speedwalk_recovery_rooms = {}
       if remaining_speedwalk_steps () > 0 then
         local dir = take_next_speedwalk_step ()
         next_speedwalk_dir = dir.dir
@@ -1447,6 +1484,9 @@ function resume_speedwalk_recovery(recovery_dir)
   end
 
   deferred_speedwalk_mismatch = nil
+  if (not note_speedwalk_recovery_attempt (mismatch.actual_uid)) then
+    return false
+  end
   next_speedwalk_dir = recovery_dir
   next_dir = (expand_direction[recovery_dir] or recovery_dir)
 
@@ -1987,6 +2027,8 @@ function init (t)
   path_cache_generation = nil
   deferred_speedwalk_mismatch = nil
   paused_speedwalk = nil
+  speedwalk_recovery_attempts = 0
+  speedwalk_recovery_rooms = {}
 
   -- make copy of colours, sizes etc.
   config = t.config
@@ -2413,6 +2455,8 @@ end -- start_speedwalk
 local function reset_speedwalk_state ()
   current_speedwalk = nil
   deferred_speedwalk_mismatch = nil
+  speedwalk_recovery_attempts = 0
+  speedwalk_recovery_rooms = {}
   speedwalk_index = nil
   expected_room = nil
   hyperlink_paths = nil

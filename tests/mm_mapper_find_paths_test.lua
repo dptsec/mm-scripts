@@ -1202,6 +1202,111 @@ tests[#tests + 1] = {
   end,
 }
 
+tests[#tests + 1] = {
+  name = "forced_movement_recovery_gives_up_after_budget",
+  run = function()
+  -- every recovery lands in yet another wrong room; the walk must cancel
+  -- after the attempt budget instead of correcting forever
+  local graph = {
+    S = { exits = { east = "A" } },
+    A = { exits = {} },
+    W1 = { exits = { west = "A" } },
+    W2 = { exits = { west = "A" } },
+    W3 = { exits = { west = "A" } },
+    W4 = { exits = { west = "A" } },
+    W5 = { exits = { west = "A" } },
+    W6 = { exits = { west = "A" } },
+  }
+  executed_commands = {}
+
+  init_mapper_for_speedwalk(graph, function()
+    return "west"
+  end)
+
+  mapper.draw("S")
+  mapper.start_speedwalk({ { dir = "east", uid = "A" } })
+
+  for i = 1, 6 do
+    mapper.draw("W" .. i)
+  end
+
+  assert_equal(#executed_commands, 6, "one step plus five recoveries")
+  assert_equal(executed_commands[6], "west", "last recovery command")
+  assert_equal(mapper.get_next_dir(), nil, "walk cancelled after budget")
+  end,
+}
+
+tests[#tests + 1] = {
+  name = "forced_movement_recovery_detects_orbiting",
+  run = function()
+  -- returning to a wrong room already recovered from means we are circling
+  -- the expected room; cancel immediately rather than spending the budget
+  local graph = {
+    S = { exits = { east = "A" } },
+    A = { exits = {} },
+    W1 = { exits = { west = "A" } },
+    W2 = { exits = { west = "A" } },
+  }
+  executed_commands = {}
+
+  init_mapper_for_speedwalk(graph, function()
+    return "west"
+  end)
+
+  mapper.draw("S")
+  mapper.start_speedwalk({ { dir = "east", uid = "A" } })
+
+  mapper.draw("W1")
+  mapper.draw("W2")
+  mapper.draw("W1")
+
+  assert_equal(#executed_commands, 3, "one step plus two recoveries")
+  assert_equal(mapper.get_next_dir(), nil, "walk cancelled on revisit")
+  end,
+}
+
+tests[#tests + 1] = {
+  name = "forced_movement_recovery_budget_resets_on_success",
+  run = function()
+  -- a gust before every step, each recovered in one correction: more total
+  -- recoveries than the budget, but never consecutively, so the walk finishes
+  local graph = {
+    S = { exits = { east = "A1" } },
+    A1 = { exits = { east = "A2" } },
+    A2 = { exits = { east = "A3" } },
+    A3 = { exits = { east = "A4" } },
+    A4 = { exits = { east = "A5" } },
+    A5 = { exits = { east = "A6" } },
+    A6 = { exits = {} },
+    G = { exits = { west = "A1" } },
+  }
+  executed_commands = {}
+
+  init_mapper_for_speedwalk(graph, function()
+    return "west"
+  end)
+
+  mapper.draw("S")
+  mapper.start_speedwalk({
+    { dir = "east", uid = "A1" },
+    { dir = "east", uid = "A2" },
+    { dir = "east", uid = "A3" },
+    { dir = "east", uid = "A4" },
+    { dir = "east", uid = "A5" },
+    { dir = "east", uid = "A6" },
+  })
+
+  for i = 1, 6 do
+    mapper.draw("G")           -- blown off course
+    mapper.draw("A" .. i)      -- recovery lands on the expected room
+  end
+
+  -- 6 walk steps + 6 single recoveries, and the walk completed
+  assert_equal(#executed_commands, 12, "steps plus recoveries")
+  assert_equal(mapper.get_next_dir(), nil, "walk finished")
+  end,
+}
+
 local failures = 0
 
 for _, test in ipairs(tests) do
