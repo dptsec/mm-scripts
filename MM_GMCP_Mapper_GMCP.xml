@@ -5490,6 +5490,12 @@ function map_toggle_exit_tag(id, dir, tag)
     return
   end
 
+  -- refuse to tag a nonexistent exit, but still allow untagging one
+  if (not room.exits[dir]) and (not has_tag(room.exits_tags[dir], tag)) then
+    mapper.mapprint("The room", id, "has no exit '" .. dir .. "' to tag.")
+    return
+  end
+
   room_toggle_exit_tag(room, id, dir, tag)
 end
 
