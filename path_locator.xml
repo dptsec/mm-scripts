@@ -1,0 +1,462 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+   name="path_locator"
+   author="Ferdinand"
+   id="28149d6efdbd4bbf5340453f"
+   language="Lua"
+   purpose="find where a walk path starts using the map database"
+   save_state="n"
+   date_written="2026-08-05 12:00:00"
+   requires="4.71"
+   version="1.1">
+
+<description trim="y">
+
+<![CDATA[
+
+Answers "where does this walk start?" using the mapper database.
+
+ * wherepath <directions>
+ * wherepath nolib <directions>
+
+Directions are space-separated: n s e w ne nw se sw u d tprt prtl
+
+The mapper database is never written to (queries run under PRAGMA
+query_only).
+
+Every room flagged both safe and library (the best guess for a recall
+room) is tried as a starting point; rooms from which the whole path can
+be walked are listed with their area, starting room and ending room.
+Paths whose ending room lies outside the starting room's area are
+discarded.
+
+The nolib form drops the library requirement and tries every safe room.
+
+Example:
+
+ wherepath ne n n n n w u
+
+Also answers "what is the closest area to this room?":
+
+ * closestpath <room name>
+
+Rooms matching the name (exact first, then substring) are used as
+starting points.  Two answers are given:
+
+ 1. A breadth-first search over recorded exits: the nearest rooms
+    belonging to a different area, with the walked step count.
+ 2. For starting rooms on the Alyria overworld, every recorded
+    entrance from Alyria into another area ranked by grid distance
+    (overworld uids encode map coordinates), which also covers areas
+    the recorded walks never reach.
+
+Example:
+
+ closestpath Snowy Fields of the Prowce Tundra
+
+]]>
+
+</description>
+
+</plugin>
+
+<aliases>
+  <alias
+    enabled="y"
+    match="^wherepath(?: (.*))?$"
+    regexp="y"
+    ignore_case="y"
+    sequence="100"
+    group="path_locator"
+    script="wherepath"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^closestpath(?: (.*))?$"
+    regexp="y"
+    ignore_case="y"
+    sequence="100"
+    group="path_locator"
+    script="closestpath"
+  >
+  </alias>
+</aliases>
+
+<script>
+
+<![CDATA[
+
+-- same set as the mapper's is_valid_direction
+local DIRECTIONS = {
+  n = true, s = true, e = true, w = true,
+  ne = true, nw = true, se = true, sw = true,
+  u = true, d = true, tprt = true, prtl = true,
+}
+
+-- quote a string for SQL
+local function fixsql (s)
+  return "'" .. string.gsub(s, "'", "''") .. "'"
+end
+
+local function parse_path (text)
+  local path = {}
+  for token in string.gmatch(text or "", "%S+") do
+    local dir = string.lower(token)
+    if not DIRECTIONS[dir] then
+      return nil, token
+    end
+    table.insert(path, dir)
+  end
+  return path
+end
+
+local function walk (db, fromuid, path)
+  local current = fromuid
+  for _, dir in ipairs(path) do
+    local touid
+    for row in db:nrows(string.format(
+        "SELECT touid FROM active_exits WHERE fromuid = %s AND dir = %s LIMIT 1",
+        fixsql(current), fixsql(dir))) do
+      touid = row.touid
+    end
+    if not touid then
+      return nil
+    end
+    current = touid
+  end
+  return current
+end
+
+local function end_room (db, uid)
+  local room
+  for row in db:nrows(string.format(
+      "SELECT name, area FROM rooms WHERE uid = %s LIMIT 1", fixsql(uid))) do
+    room = { name = row.name or uid, area = row.area }
+  end
+  return room  -- nil when the room row is missing (stale touid)
+end
+
+-- no CREATE: a missing file still fails to open (the shim has no flag constants)
+local SQLITE_OPEN_READWRITE = 2
+local SQLITE_CANTOPEN = 14
+
+local function active_exits_ready (db)
+  local ready
+  local ok, probe_err = pcall(function ()
+    for row in db:nrows(
+        "SELECT value FROM mapper_meta WHERE key = 'active_exits_ready'") do
+      ready = row.value
+    end
+  end)
+  if not ok then
+    return false, probe_err
+  end
+  return tostring(ready) == "1"
+end
+
+local function open_mapper_db ()
+  local dbfile = GetInfo(66) .. "mm_mapper.db"
+  -- READWRITE rather than READONLY: the database is WAL-journaled, and a
+  -- read-only connection cannot recreate the -shm sidecar when the mapper
+  -- is not holding the database open.  query_only blocks writes instead.
+  local db, code = sqlite3.open(dbfile, SQLITE_OPEN_READWRITE)
+  if not db then
+    if code == SQLITE_CANTOPEN then
+      local legacy = io.open(GetInfo(66) .. Trim(WorldAddress()) .. "_mapper.db", "r")
+      if legacy then
+        legacy:close()
+        return nil, "only a legacy mapper database exists; run 'mapper upgrade database' first"
+      end
+      return nil, "mapper database not found: " .. dbfile
+    end
+    return nil, string.format("cannot open mapper database (error %s): %s",
+      tostring(code), dbfile)
+  end
+  db:exec("PRAGMA query_only = 1")
+
+  local ready, probe_err = active_exits_ready(db)
+  if not ready then
+    db:close()
+    if probe_err then
+      return nil, "cannot read the mapper database: " .. tostring(probe_err)
+    end
+    return nil, "the mapper's exit cache is not built; load the mapper plugin once, then retry"
+  end
+  return db
+end
+
+local function find_starts (path, require_library)
+  local db, err = open_mapper_db()
+  if not db then
+    return nil, err
+  end
+
+  local where = " WHERE (',' || REPLACE(flags, ' ', '') || ',') LIKE '%,safe,%'"
+  if require_library then
+    where = where .. " AND (',' || REPLACE(flags, ' ', '') || ',') LIKE '%,library,%'"
+  end
+
+  local matches = {}
+  local ok, scan_err = pcall(function ()
+    for row in db:nrows(
+        "SELECT uid, name, area FROM rooms" .. where .. " ORDER BY area, uid") do
+      local enduid = walk(db, row.uid, path)
+      if enduid then
+        -- the ending room must be inside the starting room's area; a stale
+        -- touid with no room row has no area, so it cannot qualify
+        local endroom = end_room(db, enduid)
+        if endroom and endroom.area == row.area then
+          table.insert(matches, {
+            area = row.area or "(no area)",
+            startname = row.name or row.uid,
+            startuid = row.uid,
+            endname = endroom.name,
+            enduid = enduid,
+          })
+        end
+      end
+    end
+  end)
+  db:close()
+  if not ok then
+    return nil, "error while searching the mapper database: " .. tostring(scan_err)
+  end
+  return matches
+end
+
+function wherepath (name, line, wildcards)
+  local text = wildcards[1] or ""
+  local require_library = true
+  local first = string.match(text, "^%s*(%S+)")
+  if first and string.lower(first) == "nolib" then
+    require_library = false
+    text = string.match(text, "^%s*%S+%s*(.*)$")
+  end
+
+  local path, bad_token = parse_path(text)
+  if bad_token then
+    ColourNote("white", "maroon", string.format(
+      "wherepath: '%s' is not a direction (use n s e w ne nw se sw u d tprt prtl)", bad_token))
+    return
+  end
+  if #path == 0 then
+    ColourNote("silver", "black", "Usage: wherepath [nolib] <directions>  e.g. wherepath ne n n n n w u")
+    return
+  end
+
+  local matches, err = find_starts(path, require_library)
+  if not matches then
+    ColourNote("white", "maroon", "wherepath: " .. err)
+    return
+  end
+  local label = require_library and "safe library room" or "safe room"
+  if #matches == 0 then
+    ColourNote("silver", "black", "wherepath: no " .. label .. " can walk that path.")
+    return
+  end
+
+  ColourNote("silver", "black", string.format(
+    "wherepath: %d %s(s) can walk that path:", #matches, label))
+  for _, m in ipairs(matches) do
+    ColourNote("white", "black", string.format("%s: %s (%s) -> %s (%s)",
+      m.area, m.startname, m.startuid, m.endname, m.enduid))
+  end
+end
+
+-- Alyria overworld uids encode grid coordinates: uid = y * 2300 + x
+-- (verified against active_exits: 'e' exits are +1, 's' exits are +2300)
+local GRID_W = 2300
+
+local function grid_coords (uid)
+  if not string.match(uid, "^%d+$") then
+    return nil
+  end
+  local n = tonumber(uid)
+  return math.floor(n / GRID_W), n % GRID_W
+end
+
+-- breadth-first search outward from the source rooms through recorded
+-- exits; rooms belonging to an area other than the sources' own are
+-- recorded as hits and not expanded through
+local function bfs_nearest_areas (db, sources, home_areas)
+  local MAX_VISITED = 50000  -- safety cap on well-mapped regions
+  local MAX_AREAS = 10
+  local dist, frontier = {}, {}
+  for _, uid in ipairs(sources) do
+    dist[uid] = 0
+    table.insert(frontier, uid)
+  end
+  local hits, hit_count, visited, depth = {}, 0, #frontier, 0
+  while #frontier > 0 and visited < MAX_VISITED and hit_count < MAX_AREAS do
+    depth = depth + 1
+    local nextf = {}
+    for i = 1, #frontier, 200 do
+      local chunk = {}
+      for j = i, math.min(i + 199, #frontier) do
+        table.insert(chunk, fixsql(frontier[j]))
+      end
+      for row in db:nrows(
+          "SELECT ae.touid AS touid, r.name AS name, r.area AS area"
+          .. " FROM active_exits ae LEFT JOIN rooms r ON r.uid = ae.touid"
+          .. " WHERE ae.fromuid IN (" .. table.concat(chunk, ",") .. ")") do
+        local v = row.touid
+        if not dist[v] then
+          dist[v] = depth
+          visited = visited + 1
+          local area = row.area
+          if area and area ~= "" and not home_areas[area] then
+            if not hits[area] then
+              hits[area] = { steps = depth, uid = v, name = row.name or v }
+              hit_count = hit_count + 1
+            end
+          else
+            table.insert(nextf, v)
+          end
+        end
+      end
+    end
+    frontier = nextf
+  end
+  return hits
+end
+
+-- every recorded exit crossing from the Alyria overworld into another
+-- area, ranked by grid (Chebyshev) distance from the nearest source room
+local function geo_nearest_areas (db, source_coords)
+  local best = {}
+  for row in db:nrows(
+      "SELECT ae.fromuid AS fromuid, r2.area AS area"
+      .. " FROM active_exits ae"
+      .. " JOIN rooms r1 ON r1.uid = ae.fromuid"
+      .. " JOIN rooms r2 ON r2.uid = ae.touid"
+      .. " WHERE r1.area = 'Alyria' AND r2.area IS NOT NULL"
+      .. " AND r2.area <> '' AND r2.area <> 'Alyria'") do
+    local y, x = grid_coords(row.fromuid)
+    if y then
+      local d
+      for _, c in ipairs(source_coords) do
+        local cd = math.max(math.abs(y - c.y), math.abs(x - c.x))
+        if not d or cd < d then
+          d = cd
+        end
+      end
+      local cur = best[row.area]
+      if not cur or d < cur.dist then
+        best[row.area] = { dist = d, y = y, x = x }
+      end
+    end
+  end
+  return best
+end
+
+local function sorted_by_distance (map, key)
+  local list = {}
+  for area, info in pairs(map) do
+    table.insert(list, { area = area, info = info })
+  end
+  table.sort(list, function (a, b)
+    if a.info[key] ~= b.info[key] then
+      return a.info[key] < b.info[key]
+    end
+    return a.area < b.area
+  end)
+  return list
+end
+
+function closestpath (name, line, wildcards)
+  local text = Trim(wildcards[1] or "")
+  if text == "" then
+    ColourNote("silver", "black",
+      "Usage: closestpath <room name>  e.g. closestpath Snowy Fields of the Prowce Tundra")
+    return
+  end
+
+  local db, err = open_mapper_db()
+  if not db then
+    ColourNote("white", "maroon", "closestpath: " .. err)
+    return
+  end
+
+  local ok, run_err = pcall(function ()
+    -- exact name match first, substring match as a fallback
+    local sources, source_coords, home_areas = {}, {}, {}
+    local matched_exactly = true
+    for row in db:nrows(
+        "SELECT uid, area FROM rooms WHERE name = " .. fixsql(text)
+        .. " COLLATE NOCASE LIMIT 50") do
+      table.insert(sources, row.uid)
+      home_areas[row.area or ""] = true
+      if row.area == "Alyria" then
+        local y, x = grid_coords(row.uid)
+        if y then
+          table.insert(source_coords, { y = y, x = x })
+        end
+      end
+    end
+    if #sources == 0 then
+      matched_exactly = false
+      for row in db:nrows(
+          "SELECT uid, area FROM rooms WHERE name LIKE " .. fixsql("%" .. text .. "%")
+          .. " LIMIT 50") do
+        table.insert(sources, row.uid)
+        home_areas[row.area or ""] = true
+        if row.area == "Alyria" then
+          local y, x = grid_coords(row.uid)
+          if y then
+            table.insert(source_coords, { y = y, x = x })
+          end
+        end
+      end
+    end
+    if #sources == 0 then
+      ColourNote("silver", "black",
+        "closestpath: no room is named (or contains) '" .. text .. "'.")
+      return
+    end
+
+    ColourNote("silver", "black", string.format(
+      "closestpath: searching from %d room(s) %s '%s'",
+      #sources, matched_exactly and "named" or "matching", text))
+
+    local hits = bfs_nearest_areas(db, sources, home_areas)
+    local walked = sorted_by_distance(hits, "steps")
+    if #walked == 0 then
+      ColourNote("silver", "black",
+        "closestpath: no other area is reachable by recorded walks.")
+    else
+      ColourNote("silver", "black", "Nearest by recorded walk:")
+      for _, w in ipairs(walked) do
+        ColourNote("white", "black", string.format("%5d steps  %s (enter at: %s [%s])",
+          w.info.steps, w.area, w.info.name, w.info.uid))
+      end
+    end
+
+    if #source_coords > 0 then
+      local geo = sorted_by_distance(geo_nearest_areas(db, source_coords), "dist")
+      if #geo > 0 then
+        ColourNote("silver", "black",
+          "Nearest overworld entrances by grid distance:")
+        for i = 1, math.min(10, #geo) do
+          ColourNote("white", "black", string.format("%5d rooms  %s",
+            geo[i].info.dist, geo[i].area))
+        end
+      end
+    end
+  end)
+  db:close()
+  if not ok then
+    ColourNote("white", "maroon",
+      "closestpath: error while searching the mapper database: " .. tostring(run_err))
+  end
+end
+
+]]>
+
+</script>
+
+</muclient>
