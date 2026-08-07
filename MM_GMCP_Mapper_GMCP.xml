@@ -1034,6 +1034,14 @@ function OnPluginInstall()
       config[k] = config[k] or v
     end
 
+    -- repair colours saved as -1: clients whose ColourNameToRGB did not
+    -- know the extended colour names persisted -1, which renders white
+    for k, v in pairs(config) do
+      if (type(v) == "table") and (v.colour == -1) and default_config[k] then
+        v.colour = default_config[k].colour
+      end
+    end
+
     -- initialize mapper
     mapper.init {
       config = config,
