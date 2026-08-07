@@ -106,7 +106,8 @@ Syntax:
 
 * mapper goto <room#>  - walk to a room, by its room number (partial)
 * mapper stop  - cancel any current speedwalk
-* mapper resume  - resume last speedwalk or hyperlinked speedwalk
+* mapper pause  - pause the current speedwalk, keeping its remaining steps
+* mapper resume  - resume the paused speedwalk from the room where it stopped
 * mapper speedwalk next  - show (or SAPI say) next direction of the speedwalk (to flee, etc.)
 
 * mapper distance <room#>  - show the distance to a room, by its room number
@@ -494,15 +495,6 @@ http://github.com/MateriaMagicaLLC/mm-mushclient-scripts
     regexp="y"
     sequence="100"
     script="mapper.cancel_speedwalk"
-  >
-  </alias>
-
-  <alias
-    enabled="y"
-    match="^mapper[ ]+resume$"
-    regexp="y"
-    sequence="100"
-    script="map_resume"
   >
   </alias>
 
@@ -3450,18 +3442,6 @@ function map_goto(wanted)
   end
 
   config.SCAN.depth = old_depth
-end
-
-
-function map_resume(name, line, wildcards)
-  local wanted = mapper.last_hyperlink_uid or mapper.last_speedwalk_uid
-
-  if (wanted) then
-    map_goto(wanted)
-
-  elseif (not wanted) then
-    mapper.mapprint("No outstanding speedwalks or hyperlinks.")
-  end -- if nothing to do
 end
 
 
