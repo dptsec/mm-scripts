@@ -787,6 +787,39 @@ tests[#tests + 1] = {
 }
 
 tests[#tests + 1] = {
+  name = "speedwalk_step_checks_exit_tags_on_the_room_being_left",
+  run = function()
+  -- Mirrors the Towne Square log: room A carries a no-speed tag on an east
+  -- exit it doesn't even have, and the walk's next step is east from the
+  -- room after it. The stale tag must not cancel the walk.
+  local graph = {
+    S = { exits = { north = "A" } },
+    A = { exits = { north = "B" }, exits_tags = { e = "no-speed" } },
+    B = { exits = { east = "C" } },
+    C = { exits = {} },
+  }
+  executed_commands = {}
+
+  init_mapper_for_speedwalk(graph)
+  mapper.set_use_nospeed_mode_to(false)
+
+  mapper.draw("S")
+  mapper.start_speedwalk({
+    { dir = "north", uid = "A" },
+    { dir = "north", uid = "B" },
+    { dir = "east", uid = "C" },
+  })
+  mapper.draw("A")
+  mapper.draw("B")
+
+  assert_equal(executed_commands[1], "north", "first step")
+  assert_equal(executed_commands[2], "north", "second step")
+  assert_equal(executed_commands[3], "east", "east step blocked by previous room's tag")
+  mapper.cancel_speedwalk()
+  end,
+}
+
+tests[#tests + 1] = {
   name = "speedwalk_mismatch_can_wait_for_forced_movement_message",
   run = function()
   local graph = {

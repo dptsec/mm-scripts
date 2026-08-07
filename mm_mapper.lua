@@ -1357,7 +1357,7 @@ local function changed_room (uid)
         next_speedwalk_dir = dir.dir
         next_dir = (expand_direction[dir.dir] or dir.dir)
 
-        if (not check_if_should_walk(next_dir, dir.uid)) then
+        if (not check_if_should_walk(next_dir, dir.uid, uid)) then
           return
         end
 
