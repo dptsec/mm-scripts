@@ -500,6 +500,15 @@ http://github.com/MateriaMagicaLLC/mm-mushclient-scripts
 
   <alias
     enabled="y"
+    match="^mapper[ ]+pixelprobe$"
+    regexp="y"
+    sequence="100"
+    script="map_pixel_probe"
+  >
+  </alias>
+
+  <alias
+    enabled="y"
     match="^mapper[ ]+speed(|walk)[ ]+next$"
     regexp="y"
     sequence="100"
@@ -3442,6 +3451,124 @@ function map_goto(wanted)
   end
 
   config.SCAN.depth = old_depth
+end
+
+
+-- diagnostic: read the live map bitmap back through WindowGetPixel and
+-- report (a) a colour histogram and (b) whether the gaps between adjacent
+-- room hotspots contain connector-line pixels. Distinguishes "lines were
+-- never rasterized" from "bitmap is right but the screen shows otherwise".
+
+function map_pixel_probe(name, line, wildcards)
+  local winid = GetPluginID() .. "_mapper"
+  local w = WindowInfo(winid, 3)
+  local h = WindowInfo(winid, 4)
+  if (not w) or (w <= 0) or (not h) or (h <= 0) then
+    mapper.mapprint("pixelprobe: no mapper window found (" .. winid .. ")")
+    return
+  end
+  mapper.mapprint(string.format("pixelprobe: window %dx%d, sampling...", w, h))
+
+  -- colour histogram (every 2nd pixel is plenty)
+  local counts = {}
+  for y = 0, h - 1, 2 do
+    for x = 0, w - 1, 2 do
+      local c = WindowGetPixel(winid, x, y)
+      if (c) then
+        counts[c] = (counts[c] or 0) + 1
+      end
+    end
+  end
+  local ordered = {}
+  for c, n in pairs(counts) do
+    ordered[#ordered + 1] = { c = c, n = n }
+  end
+  table.sort(ordered, function(a, b) return a.n > b.n end)
+  local top = {}
+  for i = 1, math.min(10, #ordered) do
+    top[#top + 1] = string.format("%06X=%d", ordered[i].c, ordered[i].n)
+  end
+  local background = (#ordered > 0) and ordered[1].c or 0
+  mapper.mapprint("pixelprobe: top colours (BGR=count): " .. table.concat(top, " "))
+  mapper.mapprint(string.format("pixelprobe: exit colour is %06X, room colour is %06X",
+    config.EXIT_COLOUR.colour, config.ROOM_COLOUR.colour))
+  mapper.mapprint(string.format(
+    "pixelprobe: background %06X, updown %06X, safe-fill %06X, our-room %06X, ColourNameToRGB green=%s teal=%s",
+    (config.BACKGROUND_COLOUR or {}).colour or -1,
+    (config.EXIT_COLOUR_UP_DOWN or {}).colour or -1,
+    (config.SAFE_FILL_COLOUR or {}).colour or -1,
+    (config.OUR_ROOM_COLOUR or {}).colour or -1,
+    tostring(ColourNameToRGB("green")), tostring(ColourNameToRGB("teal"))))
+
+  -- room hotspots (square-ish, small) give us the drawn room rectangles
+  local squares = {}
+  for _, id in ipairs(WindowHotspotList(winid) or {}) do
+    local l = WindowHotspotInfo(winid, id, 1)
+    local t = WindowHotspotInfo(winid, id, 2)
+    local r = WindowHotspotInfo(winid, id, 3)
+    local b = WindowHotspotInfo(winid, id, 4)
+    if (l and t and r and b) then
+      local wdt, hgt = r - l, b - t
+      if (wdt > 3) and (wdt < 45) and (math.abs(wdt - hgt) <= 2) then
+        squares[#squares + 1] = {
+          l = l, t = t, r = r, b = b,
+          cx = math.floor((l + r) / 2), cy = math.floor((t + b) / 2),
+        }
+      end
+    end
+  end
+  mapper.mapprint(string.format("pixelprobe: %d room hotspots", #squares))
+
+  -- does the strip between two adjacent rooms contain any non-background ink?
+  -- checks the direct span plus one pixel either side of it
+  local function strip_has_ink(x1, y1, x2, y2)
+    local dx = (x2 > x1) and 1 or 0
+    local dy = (y2 > y1) and 1 or 0
+    local len = math.max(x2 - x1, y2 - y1)
+    for off = -1, 1 do
+      for i = 0, len do
+        local c = WindowGetPixel(winid, x1 + (dx * i) + (dy * off), y1 + (dy * i) + (dx * off))
+        if (c) and (c ~= background) then
+          return true
+        end
+      end
+    end
+    return false
+  end
+
+  local hgaps, hink, vgaps, vink = 0, 0, 0, 0
+  for i = 1, #squares do
+    for j = 1, #squares do
+      local a, c = squares[i], squares[j]
+      if (i ~= j) then
+        if (math.abs(a.cy - c.cy) <= 1) and (c.l > a.r) and ((c.l - a.r) < 50) then
+          hgaps = hgaps + 1
+          if strip_has_ink(a.r + 2, a.cy, c.l - 2, a.cy) then
+            hink = hink + 1
+          end
+        end
+        if (math.abs(a.cx - c.cx) <= 1) and (c.t > a.b) and ((c.t - a.b) < 50) then
+          vgaps = vgaps + 1
+          if strip_has_ink(a.cx, a.b + 2, a.cx, c.t - 2) then
+            vink = vink + 1
+          end
+        end
+      end
+    end
+  end
+  mapper.mapprint(string.format(
+    "pixelprobe: horizontal gaps between adjacent rooms: %d, containing line pixels: %d", hgaps, hink))
+  mapper.mapprint(string.format(
+    "pixelprobe: vertical gaps between adjacent rooms: %d, containing line pixels: %d", vgaps, vink))
+  if (hgaps + vgaps) > 0 then
+    if (hink + vink) == 0 then
+      mapper.mapprint("pixelprobe: VERDICT - the bitmap itself has NO connector lines; the draw commands are being lost before rasterization.")
+    elseif (hink + vink) < (hgaps + vgaps) / 2 then
+      mapper.mapprint("pixelprobe: VERDICT - the bitmap has SOME connector lines but many gaps are empty.")
+    else
+      mapper.mapprint("pixelprobe: VERDICT - the bitmap contains the connector lines. If the screen doesn't show them, the fault is in compositing, not drawing.")
+    end
+  end
 end
 
 
