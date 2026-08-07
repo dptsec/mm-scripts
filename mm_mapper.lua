@@ -2185,8 +2185,8 @@ function find (f, show_uid, expected_count, walk, fcb)
     return
   end -- if
 
-  if fcb then
-    assert (type (fcb) == "function")
+  if type (fcb) ~= "function" then
+    fcb = nil  -- old plugin versions pass config2.safewalk (a boolean) here
   end -- if
 
   local start_time = utils.timer ()
