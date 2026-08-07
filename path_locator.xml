@@ -12,7 +12,7 @@
    save_state="n"
    date_written="2026-08-05 12:00:00"
    requires="4.71"
-   version="1.1">
+   version="1.2">
 
 <description trim="y">
 
@@ -22,8 +22,13 @@ Answers "where does this walk start?" using the mapper database.
 
  * wherepath <directions>
  * wherepath nolib <directions>
+ * wherepath reverse <directions>
 
-Directions are space-separated: n s e w ne nw se sw u d tprt prtl
+Directions are space- or comma-separated: n s e w ne nw se sw u d tprt prtl
+
+The reverse form inverts the path (reversed order, opposite directions)
+before searching: 'wherepath reverse w s s' searches 'n n e'. Teleports
+and portals have no inverse. Options combine in any order.
 
 The mapper database is never written to (queries run under PRAGMA
 query_only).
@@ -105,7 +110,7 @@ end
 
 local function parse_path (text)
   local path = {}
-  for token in string.gmatch(text or "", "%S+") do
+  for token in string.gmatch(text or "", "[^%s,]+") do
     local dir = string.lower(token)
     if not DIRECTIONS[dir] then
       return nil, token
@@ -113,6 +118,25 @@ local function parse_path (text)
     table.insert(path, dir)
   end
   return path
+end
+
+local INVERSE_DIRECTION = {
+  n = "s", s = "n", e = "w", w = "e",
+  ne = "sw", sw = "ne", nw = "se", se = "nw",
+  u = "d", d = "u",
+}
+
+-- walk the path backwards, stepping opposite each direction
+local function invert_path (path)
+  local inverted = {}
+  for i = #path, 1, -1 do
+    local dir = INVERSE_DIRECTION[path[i]]
+    if not dir then
+      return nil, path[i]
+    end
+    table.insert(inverted, dir)
+  end
+  return inverted
 end
 
 local function walk (db, fromuid, path)
@@ -232,10 +256,19 @@ end
 function wherepath (name, line, wildcards)
   local text = wildcards[1] or ""
   local require_library = true
-  local first = string.match(text, "^%s*(%S+)")
-  if first and string.lower(first) == "nolib" then
-    require_library = false
-    text = string.match(text, "^%s*%S+%s*(.*)$")
+  local reverse = false
+  while true do
+    local first, rest = string.match(text, "^%s*(%S+)%s*(.*)$")
+    local lowered = first and string.lower(first)
+    if lowered == "nolib" then
+      require_library = false
+      text = rest
+    elseif lowered == "reverse" then
+      reverse = true
+      text = rest
+    else
+      break
+    end
   end
 
   local path, bad_token = parse_path(text)
@@ -245,8 +278,20 @@ function wherepath (name, line, wildcards)
     return
   end
   if #path == 0 then
-    ColourNote("silver", "black", "Usage: wherepath [nolib] <directions>  e.g. wherepath ne n n n n w u")
+    ColourNote("silver", "black", "Usage: wherepath [nolib] [reverse] <directions>  e.g. wherepath ne n n n n w u")
     return
+  end
+
+  if reverse then
+    local inverted, bad_dir = invert_path(path)
+    if not inverted then
+      ColourNote("white", "maroon", string.format(
+        "wherepath: cannot reverse '%s' (teleports and portals have no inverse)", bad_dir))
+      return
+    end
+    path = inverted
+    ColourNote("silver", "black",
+      "wherepath: searching the inverse path: " .. table.concat(path, " "))
   end
 
   local matches, err = find_starts(path, require_library)
