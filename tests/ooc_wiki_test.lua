@@ -145,6 +145,14 @@ add("render_page trailing br does not double-space", function()
   eq(line_text(lines[4]), "Boss Kill: Up to 241")
 end)
 
+add("render_page strips style and script blocks", function()
+  -- Mark_Of_Gloom embeds a multi-line <style> block; its CSS must not leak
+  local raw = 'before\n<style type="text/css">\n.logbox {color: #FFFFFF;}\n</style>\nafter'
+  local lines = wiki.render_page("T", raw, "u")
+  eq(line_text(lines[3]), "before")
+  eq(line_text(lines[4]), "after")
+end)
+
 add("render_results", function()
   local results = wiki.parse_search(SEARCH_MULTI).results
   local lines = wiki.render_results("bracelet", results)

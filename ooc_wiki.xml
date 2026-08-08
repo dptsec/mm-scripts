@@ -64,7 +64,9 @@ local COLOURS = {
   link = "cornflowerblue",
   pre = "wheat",
   error = "tomato",
-  background = "black",
+  -- empty string = the client's default output background (both clients
+  -- keep their current background for an empty colour name)
+  background = "",
 }
 
 local function file_exists(path)

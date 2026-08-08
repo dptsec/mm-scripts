@@ -121,6 +121,10 @@ function W.render_page(title, raw, page_url)
     { run("dim", string.rep("-", RULE_WIDTH)) },
   }
   raw = string.gsub(raw, "\r\n", "\n")
+  -- drop whole style/script blocks; the line-wise tag stripper would keep
+  -- their inner text (Mark_Of_Gloom embeds a multi-line <style> block)
+  raw = string.gsub(raw, "%s*<[Ss][Tt][Yy][Ll][Ee].-</[Ss][Tt][Yy][Ll][Ee]>%s*", "\n")
+  raw = string.gsub(raw, "%s*<[Ss][Cc][Rr][Ii][Pp][Tt].-</[Ss][Cc][Rr][Ii][Pp][Tt]>%s*", "\n")
   -- a <br> at end of line is one break, not two
   raw = string.gsub(raw, "<[Bb][Rr]%s*/?>%s*\n", "\n")
   raw = string.gsub(raw, "<[Bb][Rr]%s*/?>", "\n")
