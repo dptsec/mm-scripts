@@ -76,6 +76,44 @@ add("preview expands tabs", function()
   eq(pv.lines[1], "a  b")
 end)
 
+add("build_request shape", function()
+  local r = pastebin.build_request("hello world", "604800")
+  eq(r.url, "https://dpaste.org/api/")
+  eq(r.method, "POST")
+  eq(r.headers["Content-Type"], "application/x-www-form-urlencoded")
+  eq(r.body, "lexer=_text&format=url&expires=604800&content=hello%20world")
+end)
+
+add("build_request encodes hostile content", function()
+  local r = pastebin.build_request("a&b=c\nd", "onetime")
+  eq(r.body, "lexer=_text&format=url&expires=onetime&content=a%26b%3Dc%0Ad")
+end)
+
+add("parse_response plain url", function()
+  local url = pastebin.parse_response{ ok = true, status = 200,
+    body = "https://dpaste.org/ABCD\n" }
+  eq(url, "https://dpaste.org/ABCD")
+end)
+
+add("parse_response quoted url", function()
+  -- dpaste's default format wraps the url in quotes; tolerate it
+  local url = pastebin.parse_response{ ok = true, status = 200,
+    body = '"https://dpaste.org/ABCD"' }
+  eq(url, "https://dpaste.org/ABCD")
+end)
+
+add("parse_response transport error", function()
+  local url, err = pastebin.parse_response{ ok = false, err = "HTTP 400" }
+  eq(url, nil); eq(err, "HTTP 400")
+end)
+
+add("parse_response garbage body", function()
+  local url, err = pastebin.parse_response{ ok = true, status = 200,
+    body = "<html>maintenance</html>" }
+  eq(url, nil)
+  assert(err and err:find("unexpected response"), tostring(err))
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)

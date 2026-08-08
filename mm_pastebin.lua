@@ -53,4 +53,28 @@ function M.preview(content, max_lines, max_cols)
   }
 end
 
+-- Options table for mm_http's client:request; the caller adds .callback.
+function M.build_request(content, expires_value)
+  return {
+    url = M.API_URL,
+    method = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body = "lexer=_text&format=url"
+        .. "&expires=" .. http.urlencode(expires_value)
+        .. "&content=" .. http.urlencode(content),
+  }
+end
+
+function M.parse_response(resp)
+  if not resp.ok then
+    return nil, tostring(resp.err)
+  end
+  local body = string.match(resp.body or "", "^%s*(.-)%s*$")
+  body = string.match(body, '^"(.*)"$') or body
+  if not string.match(body, "^https://dpaste%.org/%S+$") then
+    return nil, "unexpected response: " .. string.sub(body, 1, 120)
+  end
+  return body
+end
+
 return M
