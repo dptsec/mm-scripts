@@ -23,8 +23,11 @@ updates after your confirmation. Also updates old plugins that speak the
 plugins_updater_v3 protocol.
 
  * update plugins           -- check everything, list what is outdated
+                               and what is available to install
  * update plugin <name|id>  -- update plugins matching a name or ID
  * update plugins lastlist  -- install everything from the last check
+ * install plugin <name|id> -- install a plugin from the manifest that
+                               is not installed yet
 
 Checks run automatically about once a day; nothing installs without you
 asking. Updates are verified against SHA-256 hashes from an RSA-signed
@@ -70,6 +73,16 @@ install LuaSec.
     sequence="100"
     group="mm_updater"
     script="updater_cmd_one"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^install plugin (.+)$"
+    regexp="y"
+    ignore_case="y"
+    sequence="100"
+    group="mm_updater"
+    script="updater_cmd_install"
   >
   </alias>
   <alias
@@ -198,6 +211,7 @@ function cl.set_var(name, value)
   SaveState()
 end
 function cl.app_dir() return GetInfo(56) end
+function cl.load_plugin(path) return LoadPlugin(path) end
 
 local http = http_lib.new()
 local u = updater.new({
@@ -210,6 +224,7 @@ local u = updater.new({
     pubkey_n = PUBKEY_N,
     legacy_manifest_url = "https://raw.githubusercontent.com/MateriaMagicaLLC/mm-mushclient-scripts/master/text/plugins_versions.txt",
     self_id = GetPluginID(),
+    self_dir = plugin_dir,
   },
 })
 
@@ -250,11 +265,33 @@ function updater_cmd_check()
   u:check(function(jobs, err)
     if err then
       note("error", "mm_updater: " .. err)
-    elseif #jobs == 0 then
+    elseif #jobs == 0 and #(u.available or {}) == 0 then
       note("text", "mm_updater: all plugins are up to date")
     else
+      if #jobs == 0 then
+        note("text", "mm_updater: all installed plugins are up to date")
+      end
       u:report()
     end
+  end)
+  schedule_pump()
+end
+
+function updater_cmd_install(name, line, wildcards)
+  if not require_tls() then return end
+  u:check(function(jobs, err)
+    if err then
+      note("error", "mm_updater: " .. err)
+      return
+    end
+    local entry = u:find_available(wildcards[1])
+    if not entry then
+      note("text", string.format(
+        "mm_updater: no installable plugin matches '%s'", wildcards[1]))
+      return
+    end
+    u.jobs = { u:plan_install(entry) }
+    u:install_all(finish_install)
   end)
   schedule_pump()
 end

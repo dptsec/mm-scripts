@@ -97,10 +97,14 @@ protocol. Keep [`mm_updater.lua`](mm_updater.lua),
 [`mm_crypto.lua`](mm_crypto.lua) and [`mm_http.lua`](mm_http.lua) in the same
 folder as the plugin.
 
-- `update plugins` — check everything and list what is outdated (clickable
-  links).
+- `update plugins` — check everything and list what is outdated, plus any
+  plugins from this repository you don't have yet (clickable links).
 - `update plugin <name|id>` — update the plugins matching a name or plugin ID.
 - `update plugins lastlist` — install everything from the last check.
+- `install plugin <name|id>` — install a listed plugin you don't have yet.
+  New plugins go next to the updater and are activated with `LoadPlugin`;
+  they are offered only in the manual check, never auto-installed, and
+  `update plugins lastlist` never includes them.
 
 A quiet check also runs about once a day; nothing is ever installed without
 your say-so. Updates are downloaded from this repository over HTTPS and
