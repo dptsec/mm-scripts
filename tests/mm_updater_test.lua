@@ -504,6 +504,188 @@ add("install_all: refuses to run twice concurrently", function()
   eq(u:busy(), false)
 end)
 
+add("legacy_candidates finds v3-protocol plugins only", function()
+  local cl = fake_cl({
+    { id = "d553d532b7fd796f3c0759c8", name = "chat", dir = "/plug/",
+      file = "/plug/chat.xml",
+      fns = { plugin_update_url =
+        "http://dl.dropbox.com/u/65599194/mm-updater/chat.xml" } },
+    { id = "eeeeeeeeeeeeeeeeeeeeeeee", name = "mute", dir = "/plug/",
+      file = "/plug/mute.xml" },                       -- no update fn
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "modern", dir = "/plug/",
+      file = "/plug/modern.xml",
+      fns = { plugin_update_url = "https://x.test/modern.xml" } },
+  })
+  local u = make_updater(fake_fs({}), cl)
+  local cands = u:legacy_candidates({ ["aaaaaaaaaaaaaaaaaaaaaaaa"] = true })
+  eq(#cands, 1, "modern-manifest and unsupported plugins excluded")
+  eq(cands[1].id, "d553d532b7fd796f3c0759c8")
+  eq(cands[1].url,
+    "http://raw.githubusercontent.com/MateriaMagicaLLC/mm-mushclient-scripts/master/src/chat.xml",
+    "dead-host rewrite applied")
+end)
+
+add("plan_legacy schedules stale xml and aux with md5", function()
+  local legacy = updater.parse_legacy_manifest(LEGACY_SAMPLE)
+  local fs = fake_fs({
+    ["/plug/mapper.xml"] = "stale mapper xml",
+    ["/mush/lua/mm_mapper.lua"] = "stale module",
+  })
+  local cl = fake_cl({
+    { id = "f973af093e715dece34dc25f", name = "mapper", dir = "/plug/",
+      file = "/plug/mapper.xml",
+      fns = { plugin_update_url = "https://host.test/src/mapper.xml" } },
+  })
+  local u = make_updater(fs, cl)
+  u.dedup_seen = {}
+  -- give the aux file a known-mismatched manifest hash
+  legacy.by_name["mm_mapper.lua"] = string.rep("0", 32)
+  local jobs = u:plan_legacy(legacy,
+    { { id = "f973af093e715dece34dc25f", url = "https://host.test/src/mapper.xml" } })
+  eq(#jobs, 1)
+  local job = jobs[1]
+  eq(job.legacy, true)
+  eq(#job.files, 2)
+  -- aux first, plugin xml last (v3 ordering: reload sees fresh modules)
+  eq(job.files[1].name, "mm_mapper.lua")
+  eq(job.files[1].url, "https://host.test/src/mm_mapper.lua")
+  eq(job.files[1].path, "/mush/lua/mm_mapper.lua")
+  eq(job.files[1].ensure_dir, "/mush/lua/")
+  eq(job.files[1].hash_kind, "md5")
+  eq(job.files[2].name, "mapper.xml")
+  eq(job.files[2].url, "https://host.test/src/mapper.xml")
+  eq(job.files[2].path, "/plug/mapper.xml")
+  eq(job.files[2].hash, "d4ba71720a60a43324a910312ef98ae3")
+end)
+
+add("plan_legacy skips current files and unknown aux hashes", function()
+  local legacy = updater.parse_legacy_manifest(LEGACY_SAMPLE)
+  -- xml content whose md5 matches the manifest is up to date
+  local current = "current xml body"
+  legacy.by_id["f973af093e715dece34dc25f"].hash = crypto.md5_hex(current)
+  local fs = fake_fs({ ["/plug/mapper.xml"] = current })
+  local cl = fake_cl({
+    { id = "f973af093e715dece34dc25f", name = "mapper", dir = "/plug/",
+      file = "/plug/mapper.xml",
+      fns = { plugin_update_url = "https://host.test/src/mapper.xml" } },
+  })
+  local u = make_updater(fs, cl)
+  u.dedup_seen = {}
+  -- mm_mapper.lua has NO by_name hash in LEGACY_SAMPLE: unverifiable, skip
+  local jobs = u:plan_legacy(legacy,
+    { { id = "f973af093e715dece34dc25f", url = "https://host.test/src/mapper.xml" } })
+  eq(#jobs, 0)
+end)
+
+add("plan_legacy honors plugin_update_aux_url overrides", function()
+  local legacy = updater.parse_legacy_manifest(
+    'id = 0d02361abda86a9c64488bf3  hash = 00000000000000000000000000000000\n'
+    .. 'name = generic_miniwindow.lua  hash = 11111111111111111111111111111111\n')
+  local fs = fake_fs({})
+  local cl = fake_cl({
+    { id = "0d02361abda86a9c64488bf3", name = "healthbar", dir = "/plug/",
+      file = "/plug/healthbar.xml",
+      fns = {
+        plugin_update_url = "https://host.test/src/healthbar.xml",
+        plugin_update_aux_url =
+          "https://other.test/lua/generic_miniwindow.lua,MUSH/lua",
+      } },
+  })
+  local u = make_updater(fs, cl)
+  u.dedup_seen = {}
+  local jobs = u:plan_legacy(legacy,
+    { { id = "0d02361abda86a9c64488bf3", url = "https://host.test/src/healthbar.xml" } })
+  eq(#jobs, 1)
+  eq(jobs[1].files[1].name, "generic_miniwindow.lua")
+  eq(jobs[1].files[1].url, "https://other.test/lua/generic_miniwindow.lua")
+  eq(jobs[1].files[1].path, "/mush/lua/generic_miniwindow.lua")
+end)
+
+add("plan_legacy warns on plain-http urls", function()
+  local legacy = updater.parse_legacy_manifest(
+    'id = d553d532b7fd796f3c0759c8  hash = 00000000000000000000000000000000\n')
+  local fs = fake_fs({ ["/plug/chat.xml"] = "stale" })
+  local cl = fake_cl({
+    { id = "d553d532b7fd796f3c0759c8", name = "chat", dir = "/plug/",
+      file = "/plug/chat.xml",
+      fns = { plugin_update_url = "http://insecure.test/chat.xml" } },
+  })
+  local u = make_updater(fs, cl)
+  u.dedup_seen = {}
+  u:plan_legacy(legacy, { { id = "d553d532b7fd796f3c0759c8",
+    url = "http://insecure.test/chat.xml" } })
+  assert(string.find(table.concat(cl.notes, "\n"), "plain http"),
+    "warned about http")
+end)
+
+add("check: full round-trip over the fake socket", function()
+  local fake = fake_socket.new()
+  local resp = function(body)
+    return "HTTP/1.1 200 OK\r\nContent-Length: " .. #body .. "\r\n\r\n" .. body
+  end
+  fake:host("raw.githubusercontent.com", 443, { routes = {
+    ["/dptsec/mm-scripts/main/manifest.txt"] = resp(MANIFEST_A),
+    ["/dptsec/mm-scripts/main/demo_plugin.xml"] = resp("demo-xml-v1"),
+  } })
+  local http = require("mm_http").new{
+    socket = fake.lib, ssl = fake.ssl, gettime = fake.lib.gettime }
+  local fs = fake_fs({
+    ["/plug/demo_plugin.xml"] = "demo-xml-OLD",
+    ["/plug/demo_module.lua"] = "demo-lua-v1",
+  })
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo",
+    dir = "/plug/", file = "/plug/demo_plugin.xml" } })
+  local u = make_updater(fs, cl, http)
+
+  local jobs, err
+  u:check(function(j, e) jobs, err = j, e end)
+  for _ = 1, 100 do http:tick(); fake:advance(0.1) end
+  eq(err, nil)
+  eq(#jobs, 1)
+  eq(cl.vars["last_serial"], "2026010100", "serial persisted")
+
+  u:report()
+  eq(cl.links[1], "update plugin aaaaaaaaaaaaaaaaaaaaaaaa")
+  eq(cl.links[#cl.links], "update plugins lastlist")
+
+  local summary
+  u:install_all(function(s) summary = s end)
+  for _ = 1, 100 do http:tick(); fake:advance(0.1) end
+  assert(summary, "install finished")
+  eq(summary.ok, 1); eq(summary.failed, 0)
+  eq(fs.files["/plug/demo_plugin.xml"], "demo-xml-v1")
+  eq(fs.files["/plug/demo_plugin.xml.old"], "demo-xml-OLD")
+end)
+
+add("check: rollback manifest rejected via persisted serial", function()
+  local fake = fake_socket.new()
+  local resp = "HTTP/1.1 200 OK\r\nContent-Length: " .. #MANIFEST_A
+    .. "\r\n\r\n" .. MANIFEST_A
+  fake:host("raw.githubusercontent.com", 443, { response = resp })
+  local http = require("mm_http").new{
+    socket = fake.lib, ssl = fake.ssl, gettime = fake.lib.gettime }
+  local cl = fake_cl({})
+  cl.vars["last_serial"] = "2026010101"   -- manifest B was seen earlier
+  local u = make_updater(fake_fs({}), cl, http)
+  local jobs, err
+  u:check(function(j, e) jobs, err = j, e end)
+  for _ = 1, 100 do http:tick(); fake:advance(0.1) end
+  eq(jobs, nil)
+  assert(string.find(err, "older"), "rollback refused: " .. tostring(err))
+end)
+
+add("check: manifest fetch failure reports an error", function()
+  local fake = fake_socket.new()   -- no hosts configured -> connect fails
+  local http = require("mm_http").new{
+    socket = fake.lib, ssl = fake.ssl, gettime = fake.lib.gettime }
+  local u = make_updater(fake_fs({}), fake_cl({}), http)
+  local jobs, err
+  u:check(function(j, e) jobs, err = j, e end)
+  for _ = 1, 200 do http:tick(); fake:advance(0.1) end
+  eq(jobs, nil)
+  assert(err, "error surfaced")
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)

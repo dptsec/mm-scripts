@@ -42,8 +42,15 @@ end
 function sock_methods:receive(_)
   local cfg = self.cfg
   if not cfg then return nil, "timeout", "" end
+  if cfg.routes and not self.chunks then
+    -- route by request path so one fake host can serve many files
+    local path = string.match(self.sent, "^%u+ (%S+) HTTP")
+    local body = path and cfg.routes[path]
+    self.chunks = body and { body } or { cfg.route_miss or "" }
+  end
+  self.chunks = self.chunks or cfg.chunks
   self.next_chunk = self.next_chunk or 1
-  local chunks = cfg.chunks
+  local chunks = self.chunks
   if self.delivered_tick == self.fake.tick then
     return nil, "timeout", ""             -- one chunk per tick
   end

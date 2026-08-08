@@ -316,6 +316,220 @@ function U:_run_job(job, done)
   next_file()
 end
 
+------------------------------------------------------------------
+-- Legacy v3 protocol support
+------------------------------------------------------------------
+
+function U:legacy_candidates(exclude_ids)
+  local cands = {}
+  for _, id in ipairs(self.cl.plugin_list()) do
+    if not exclude_ids[id] and id ~= self.config.self_id then
+      local res, urls = self.cl.call_plugin(id, "plugin_update_url")
+      if res == 0 and type(urls) == "string" then
+        local url = string.match(urls, "([^;]+)")
+        if url then
+          cands[#cands + 1] = { id = id, url = M.fix_legacy_url(url) }
+        end
+      end
+    end
+  end
+  return cands
+end
+
+local function ensure_slash(p)
+  if string.sub(p, -1) ~= "/" then return p .. "/" end
+  return p
+end
+
+-- "MUSH/lua" -> <client dir>/lua/; anything else is used as-is
+function U:_expand_dest(dest, plugin_dir)
+  if not dest or dest == "" then return plugin_dir end
+  dest = M.fix_slashes(dest)
+  local rest = string.match(dest, "^MUSH/(.*)$")
+  if rest then
+    return ensure_slash(M.fix_slashes(self.cl.app_dir()) .. rest)
+  end
+  return ensure_slash(dest)
+end
+
+-- aux URL/dest overrides a plugin declares via plugin_update_aux_url:
+-- "url[,dest];url[,dest];..." keyed here by file basename
+function U:_aux_overrides(id)
+  local overrides = {}
+  local res, saux = self.cl.call_plugin(id, "plugin_update_aux_url")
+  if res == 0 and type(saux) == "string" then
+    for item in string.gmatch(saux, "[^;]+") do
+      local url, dest = string.match(item, "^%s*([^,]+),?%s*(.-)%s*$")
+      if url then
+        url = M.fix_legacy_url(M.fix_slashes(url))
+        local base = string.match(url, "([^/]+)$")
+        if base then
+          overrides[base] = { url = url, dest = dest ~= "" and dest or nil }
+        end
+      end
+    end
+  end
+  return overrides
+end
+
+function U:plan_legacy(legacy, candidates)
+  local jobs = {}
+  self.dedup_seen = self.dedup_seen or {}
+  for _, cand in ipairs(candidates) do
+    local entry = legacy.by_id[cand.id]
+    if entry then
+      if string.match(cand.url, "^http://") then
+        self.cl.note("dim", string.format(
+          "mm_updater: %s updates over plain http -- no transport security",
+          self.cl.plugin_info(cand.id, 1) or cand.id))
+      end
+      local dir = M.fix_slashes(self.cl.plugin_info(cand.id, 20))
+      local full = M.fix_slashes(self.cl.plugin_info(cand.id, 6) or "")
+      local xml_name = string.match(full, "([^/]+)$")
+      local url_dir = string.match(cand.url, "^(.*/)") or cand.url
+      local overrides = self:_aux_overrides(cand.id)
+      local files = {}
+
+      -- the aux list is the manifest's, plus files the plugin itself
+      -- declares via plugin_update_aux_url (v3 semantics when the
+      -- manifest carries no aux_files blob)
+      local aux_list, aux_seen = {}, {}
+      for _, aux in ipairs(entry.aux) do
+        aux_list[#aux_list + 1] = aux
+        aux_seen[aux.name] = true
+      end
+      for base, o in pairs(overrides) do
+        if not aux_seen[base] then
+          aux_list[#aux_list + 1] = { name = base, dest = o.dest }
+        end
+      end
+
+      -- aux files first so a reloaded plugin sees fresh modules
+      for _, aux in ipairs(aux_list) do
+        local o = overrides[aux.name]
+        local dest = self:_expand_dest((o and o.dest) or aux.dest, dir)
+        local want = legacy.by_name[aux.name]
+        if want then
+          local data = self.fs.read(dest .. aux.name)
+          local key = aux.name .. ":" .. want
+          if (not data or self.crypto.md5_hex(data) ~= want)
+              and not self.dedup_seen[key] then
+            self.dedup_seen[key] = true
+            files[#files + 1] = {
+              name = aux.name,
+              url = (o and o.url) or (url_dir .. aux.name),
+              path = dest .. aux.name,
+              ensure_dir = dest,
+              hash_kind = "md5",
+              hash = want,
+            }
+          end
+        end
+      end
+
+      if xml_name then
+        local data = self.fs.read(dir .. xml_name)
+        if not data or self.crypto.md5_hex(data) ~= entry.hash then
+          files[#files + 1] = {
+            name = xml_name,
+            url = cand.url,
+            path = dir .. xml_name,
+            hash_kind = "md5",
+            hash = entry.hash,
+          }
+        end
+      end
+
+      if #files > 0 then
+        jobs[#jobs + 1] = {
+          id = cand.id,
+          name = self.cl.plugin_info(cand.id, 1) or cand.id,
+          legacy = true,
+          dir = dir,
+          files = files,
+        }
+      end
+    end
+  end
+  return jobs
+end
+
+------------------------------------------------------------------
+-- Check orchestration + report
+------------------------------------------------------------------
+
+function U:check(done_cb)
+  if self.running or self.checking then
+    self.cl.note("dim", "mm_updater: an update run is already in progress")
+    return
+  end
+  self.checking = true
+  local outer_done = done_cb
+  done_cb = function(jobs, err)
+    self.checking = false
+    outer_done(jobs, err)
+  end
+  self.cl.note("dim", "mm_updater: checking for updates...")
+  self.http:request({
+    url = self.config.base_url .. "manifest.txt",
+    callback = function(resp)
+      if not resp.ok then
+        return done_cb(nil, "cannot fetch manifest: " .. tostring(resp.err))
+      end
+      local manifest, err = M.parse_manifest(resp.body, {
+        crypto = self.crypto,
+        pubkey_n = self.config.pubkey_n,
+        min_serial = tonumber(self.cl.get_var("last_serial")),
+      })
+      if not manifest then return done_cb(nil, err) end
+      self.cl.set_var("last_serial", tostring(manifest.serial))
+
+      local jobs = self:plan_modern(manifest)
+      local known = {}
+      for _, p in ipairs(manifest.plugins) do known[p.id] = true end
+      local cands = self:legacy_candidates(known)
+      if #cands == 0 then
+        self.jobs = jobs
+        return done_cb(jobs, nil)
+      end
+      self.http:request({
+        url = self.config.legacy_manifest_url,
+        callback = function(lresp)
+          if lresp.ok then
+            local legacy = M.parse_legacy_manifest(lresp.body)
+            for _, job in ipairs(self:plan_legacy(legacy, cands)) do
+              -- keep the self-update job (if any) at the very end
+              local n = #jobs
+              if n > 0 and jobs[n].id == self.config.self_id then
+                table.insert(jobs, n, job)
+              else
+                jobs[n + 1] = job
+              end
+            end
+          else
+            self.cl.note("dim",
+              "mm_updater: legacy manifest unavailable -- skipping v3 plugins")
+          end
+          self.jobs = jobs
+          done_cb(jobs, nil)
+        end,
+      })
+    end,
+  })
+end
+
+function U:report()
+  local jobs = self.jobs
+  if not jobs or #jobs == 0 then return end
+  self.cl.note("text", "The following plugins have pending updates:")
+  for _, job in ipairs(jobs) do
+    local tag = job.legacy and " [legacy]" or ""
+    self.cl.link(string.format("* %s%s -- ", job.name, tag),
+      "update plugin " .. (job.id or job.name))
+  end
+  self.cl.link("Update everything above: ", "update plugins lastlist")
+end
+
 function U:install_all(done_cb)
   if self.running then
     self.cl.note("dim", "mm_updater: an update run is already in progress")
