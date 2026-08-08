@@ -42,41 +42,41 @@ add("parse_expiry unknown", function()
 end)
 
 add("preview basic", function()
-  local pv = pastebin.preview("one\ntwo", 12, 78)
+  local pv = pastebin.preview("one\ntwo", 78)
   eq(#pv.lines, 2); eq(pv.lines[1], "one"); eq(pv.lines[2], "two")
-  eq(pv.total_lines, 2); eq(pv.bytes, 7); eq(pv.truncated, false)
+  eq(pv.bytes, 7)
 end)
 
 add("preview trailing newline and CRLF", function()
-  local pv = pastebin.preview("one\n", 12, 78)
-  eq(pv.total_lines, 1, "single trailing newline is not an extra line")
+  local pv = pastebin.preview("one\n", 78)
+  eq(#pv.lines, 1, "single trailing newline is not an extra line")
   eq(pv.bytes, 4, "bytes count the full content")
-  pv = pastebin.preview("a\r\nb", 12, 78)
+  pv = pastebin.preview("a\r\nb", 78)
   eq(#pv.lines, 2); eq(pv.lines[1], "a"); eq(pv.lines[2], "b")
 end)
 
-add("preview truncation", function()
+add("preview returns every line for scrolling", function()
   local many = {}
-  for i = 1, 15 do many[i] = "line " .. i end
-  local pv = pastebin.preview(table.concat(many, "\n"), 12, 78)
-  eq(#pv.lines, 12); eq(pv.total_lines, 15); eq(pv.truncated, true)
-  eq(pv.lines[12], "line 12")
+  for i = 1, 500 do many[i] = "line " .. i end
+  local pv = pastebin.preview(table.concat(many, "\n"), 78)
+  eq(#pv.lines, 500, "no truncation -- the window scrolls instead")
+  eq(pv.lines[500], "line 500")
 end)
 
 add("preview clips long lines", function()
-  local pv = pastebin.preview(string.rep("x", 100), 12, 78)
+  local pv = pastebin.preview(string.rep("x", 100), 78)
   eq(pv.lines[1], string.rep("x", 78))
   eq(pv.bytes, 100, "bytes reflect the full content, not the clip")
 end)
 
 add("preview clip is utf8-safe", function()
   local e_acute = "\195\169"                       -- e-acute, two bytes
-  local pv = pastebin.preview(string.rep(e_acute, 80), 12, 78)
+  local pv = pastebin.preview(string.rep(e_acute, 80), 78)
   eq(pv.lines[1], string.rep(e_acute, 78), "clip counts chars, never splits a sequence")
 end)
 
 add("preview expands tabs", function()
-  local pv = pastebin.preview("a\tb", 12, 78)
+  local pv = pastebin.preview("a\tb", 78)
   eq(pv.lines[1], "a  b")
 end)
 

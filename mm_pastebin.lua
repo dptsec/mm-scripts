@@ -37,21 +37,14 @@ local function clip(line, max_cols)
   return table.concat(out)
 end
 
-function M.preview(content, max_lines, max_cols)
+-- Every line, column-clipped; the confirm window scrolls through them.
+function M.preview(content, max_cols)
   local body = string.gsub(content, "\r?\n$", "")
-  local lines, total = {}, 0
+  local lines = {}
   for line in string.gmatch(body .. "\n", "(.-)\r?\n") do
-    total = total + 1
-    if total <= max_lines then
-      table.insert(lines, clip(string.gsub(line, "\t", "  "), max_cols))
-    end
+    table.insert(lines, clip(string.gsub(line, "\t", "  "), max_cols))
   end
-  return {
-    lines = lines,
-    total_lines = total,
-    bytes = #content,
-    truncated = total > max_lines,
-  }
+  return { lines = lines, bytes = #content }
 end
 
 -- Options table for mm_http's client:request; the caller adds .callback.

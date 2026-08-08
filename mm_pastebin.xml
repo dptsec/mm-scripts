@@ -93,7 +93,7 @@ local pastebin = require "mm_pastebin"
 
 local WIN_ID = "z_pastebin_" .. GetPluginID()
 local FONT = "f"
-local PREVIEW_LINES = 12
+local VISIBLE_LINES = 15
 local PREVIEW_COLS = 78
 local PAD = 10
 
@@ -101,6 +101,7 @@ local client
 local pending          -- in-flight request handle, nil when idle
 local snapshot         -- { content, expires_value, expires_label } awaiting confirm
 local window_open = false
+local scroll_offset = 0
 
 local function note(style, text)
   ColourNote(COLOURS[style] or COLOURS.text, COLOURS.background, text)
@@ -143,7 +144,12 @@ local function output_font()
 end
 
 local function show_window()
-  local pv = pastebin.preview(snapshot.content, PREVIEW_LINES, PREVIEW_COLS)
+  local pv = pastebin.preview(snapshot.content, PREVIEW_COLS)
+  local total = #pv.lines
+  local visible = math.min(total, VISIBLE_LINES)
+  local max_offset = total - visible
+  if scroll_offset < 0 then scroll_offset = 0 end
+  if scroll_offset > max_offset then scroll_offset = max_offset end
   local font_name, font_size = output_font()
 
   -- create tiny, set the font, measure, then create at the real size
@@ -153,24 +159,31 @@ local function show_window()
 
   local title = "Send clipboard to dpaste.com?"
   local stats = string.format("%d line%s, %d bytes -- expires %s",
-    pv.total_lines, pv.total_lines == 1 and "" or "s",
-    pv.bytes, snapshot.expires_label)
-  local more = pv.truncated
-    and string.format("... +%d more lines", pv.total_lines - #pv.lines)
+    total, total == 1 and "" or "s", pv.bytes, snapshot.expires_label)
+  local footer = max_offset > 0
+    and string.format("lines %d-%d of %d -- wheel or ^ / v to scroll",
+      scroll_offset + 1, scroll_offset + visible, total)
     or nil
 
+  -- longest clipped string is the widest line in a monospaced font, so
+  -- one measurement covers the whole paste
+  local longest = ""
+  for _, l in ipairs(pv.lines) do
+    if #l > #longest then longest = l end
+  end
   local text_w = math.max(
     WindowTextWidth(WIN_ID, FONT, title, true),
-    WindowTextWidth(WIN_ID, FONT, stats, true))
-  for _, l in ipairs(pv.lines) do
-    text_w = math.max(text_w, WindowTextWidth(WIN_ID, FONT, l, true))
-  end
+    WindowTextWidth(WIN_ID, FONT, stats, true),
+    WindowTextWidth(WIN_ID, FONT, longest, true),
+    footer and WindowTextWidth(WIN_ID, FONT, footer, true) or 0)
   local width = math.min(600, math.max(420, text_w + PAD * 2))
   local button_h = line_h + 8
   local height = PAD + line_h * 2 + 6
-    + (#pv.lines + (more and 1 or 0)) * line_h
+    + visible * line_h
+    + (footer and (line_h + 4) or 0)
     + 8 + button_h + PAD
 
+  WindowDeleteAllHotspots(WIN_ID)
   WindowCreate(WIN_ID, 0, 0, width, height, miniwin.pos_center_all, 0, WIN.bg)
   WindowFont(WIN_ID, FONT, font_name, font_size)
   WindowRectOp(WIN_ID, miniwin.rect_frame, 0, 0, width, height, WIN.frame)
@@ -180,12 +193,17 @@ local function show_window()
   y = y + line_h
   WindowText(WIN_ID, FONT, stats, PAD, y, 0, 0, WIN.dim, true)
   y = y + line_h + 6
-  for _, l in ipairs(pv.lines) do
-    WindowText(WIN_ID, FONT, l, PAD, y, 0, 0, WIN.preview, true)
+
+  local preview_top = y
+  for i = scroll_offset + 1, scroll_offset + visible do
+    WindowText(WIN_ID, FONT, pv.lines[i], PAD, y, 0, 0, WIN.preview, true)
     y = y + line_h
   end
-  if more then
-    WindowText(WIN_ID, FONT, more, PAD, y, 0, 0, WIN.dim, true)
+  local preview_bottom = y
+
+  if footer then
+    y = y + 4
+    WindowText(WIN_ID, FONT, footer, PAD, y, 0, 0, WIN.dim, true)
     y = y + line_h
   end
   y = y + 8
@@ -206,8 +224,49 @@ local function show_window()
   button("cancel", "Cancel", PAD + send_w + 10,
     "pastebin_cancel_click", "Close without sending")
 
+  if max_offset > 0 then
+    -- ^ / v page buttons, right-aligned in the button row
+    local down_w = WindowTextWidth(WIN_ID, FONT, "v", true) + 24
+    local up_w = WindowTextWidth(WIN_ID, FONT, "^", true) + 24
+    button("scroll_down", "v", width - PAD - down_w,
+      "pastebin_scroll_down_click", "Scroll down a page")
+    button("scroll_up", "^", width - PAD - down_w - 10 - up_w,
+      "pastebin_scroll_up_click", "Scroll up a page")
+
+    -- wheel scrolling over the preview area
+    WindowAddHotspot(WIN_ID, "preview_area", 0, preview_top, width, preview_bottom,
+      "", "", "", "", "", "", miniwin.cursor_arrow, 0)
+    WindowScrollwheelHandler(WIN_ID, "preview_area", "pastebin_wheel")
+  end
+
   WindowShow(WIN_ID, true)
   window_open = true
+end
+
+local function scroll_by(delta)
+  if not (window_open and snapshot) then return end
+  scroll_offset = scroll_offset + delta
+  show_window()   -- redraws; show_window clamps the offset
+end
+
+function pastebin_wheel(flags, hotspot_id)
+  -- 0x100 set = wheel moved towards the user (scroll down), as in the
+  -- mapper's zoom handler
+  if bit.band(flags, 0x100) ~= 0 then
+    scroll_by(3)
+  else
+    scroll_by(-3)
+  end
+end
+
+function pastebin_scroll_up_click(flags, hotspot_id)
+  if bit.band(flags, miniwin.hotspot_got_lh_mouse) == 0 then return end
+  scroll_by(-(VISIBLE_LINES - 2))
+end
+
+function pastebin_scroll_down_click(flags, hotspot_id)
+  if bit.band(flags, miniwin.hotspot_got_lh_mouse) == 0 then return end
+  scroll_by(VISIBLE_LINES - 2)
 end
 
 local function do_upload()
@@ -273,6 +332,7 @@ function pastebin_command(name, line, wildcards)
     return
   end
   snapshot = { content = content, expires_value = value, expires_label = label }
+  scroll_offset = 0
   close_window()   -- re-running pastebin refreshes the snapshot and window
   show_window()
 end
