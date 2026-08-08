@@ -49,6 +49,10 @@ trap 'rm -f "$body"' EXIT
   echo "$PLUGINS" | while IFS='|' read -r id xml files; do
     [ -n "$id" ] || continue
     printf 'plugin %s %s\n' "$id" "$xml"
+    # the plugin's own purpose attribute doubles as its listing description
+    purpose=$(grep -o 'purpose="[^"]*"' "$xml" | head -1 \
+      | sed 's/^purpose="//;s/"$//')
+    [ -n "$purpose" ] && printf 'purpose %s %s\n' "$id" "$purpose"
     for f in $files; do
       printf 'file %s %s %s\n' "$f" \
         "$(shasum -a 256 "$f" | cut -d' ' -f1)" \

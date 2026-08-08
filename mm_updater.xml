@@ -24,6 +24,8 @@ plugins_updater_v3 protocol.
 
  * update plugins           -- check everything, list what is outdated
                                and what is available to install
+ * update plugins list      -- every plugin the manifest offers: what it
+                               is, what it needs, installed or not
  * update plugin <name|id>  -- update plugins matching a name or ID
  * update plugins lastlist  -- install everything from the last check
  * install plugin <name|id> -- install a plugin from the manifest that
@@ -78,6 +80,16 @@ install LuaSec.
     sequence="100"
     group="mm_updater"
     script="updater_cmd_one"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^update plugins list$"
+    regexp="y"
+    ignore_case="y"
+    sequence="90"
+    group="mm_updater"
+    script="updater_cmd_list"
   >
   </alias>
   <alias
@@ -278,6 +290,18 @@ function updater_cmd_check()
       end
       u:report()
     end
+  end)
+  schedule_pump()
+end
+
+function updater_cmd_list()
+  if not require_tls() then return end
+  u:check(function(jobs, err)
+    if err then
+      note("error", "mm_updater: " .. err)
+      return
+    end
+    u:list()
   end)
   schedule_pump()
 end

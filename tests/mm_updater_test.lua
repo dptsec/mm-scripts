@@ -821,6 +821,76 @@ end)
 
 local MANIFEST_C = read_file("tests/fixtures/manifest_c.txt")
 
+add("parse_manifest attaches purpose lines by plugin id", function()
+  local m = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  eq(m.plugins[1].purpose, "a demo plugin")
+  eq(m.plugins[2].purpose, "an extra plugin")
+  -- manifests without purpose lines still parse, with purpose = nil
+  local a = assert(updater.parse_manifest(MANIFEST_A, OPTS))
+  eq(a.plugins[1].purpose, nil)
+end)
+
+add("plan_available carries the purpose", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local u = make_updater(fake_fs({}), cl)
+  local avail = u:plan_available(manifest)
+  eq(avail[1].purpose, "an extra plugin")
+end)
+
+add("list shows state, links and purposes for every manifest plugin", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  -- demo installed and current; extra not installed
+  local fs = fake_fs({
+    ["/plug/demo_plugin.xml"] = "demo-xml-v1",
+    ["/plug/demo_module.lua"] = "demo-lua-v1",
+  })
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local u = make_updater(fs, cl)
+  u.manifest = manifest
+  u.jobs = u:plan_modern(manifest)
+  eq(#u.jobs, 0)
+  u:list()
+  local said = table.concat(cl.notes, "\n")
+  local linked = table.concat(cl.link_texts, "\n")
+  assert(string.find(said, "Plugins in the update manifest:", 1, true), said)
+  assert(string.find(said, "demo -- installed, up to date", 1, true), said)
+  assert(string.find(linked, "extra_plugin.xml -- not installed", 1, true), linked)
+  eq(cl.links[1], "install plugin dddddddddddddddddddddddd")
+  assert(string.find(said, "a demo plugin", 1, true), "purpose shown: " .. said)
+  assert(string.find(said, "an extra plugin", 1, true), said)
+  assert(string.find(said, "relies on: demo_module.lua", 1, true), said)
+end)
+
+add("list marks installed plugins with pending updates", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  local fs = fake_fs({ ["/plug/demo_plugin.xml"] = "demo-xml-OLD" })
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local u = make_updater(fs, cl)
+  u.manifest = manifest
+  u.jobs = u:plan_modern(manifest)
+  eq(#u.jobs, 1)
+  u:list()
+  local linked = table.concat(cl.link_texts, "\n")
+  assert(string.find(linked, "demo -- update pending", 1, true), linked)
+  local found
+  for _, cmd in ipairs(cl.links) do
+    if cmd == "update plugin aaaaaaaaaaaaaaaaaaaaaaaa" then found = true end
+  end
+  assert(found, "update link for the pending plugin")
+end)
+
+add("report shows the purpose under install offers", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local u = make_updater(fake_fs({}), cl)
+  u.jobs = {}
+  u.available = u:plan_available(manifest)
+  u:report()
+  assert(string.find(table.concat(cl.notes, "\n"), "an extra plugin", 1, true),
+    "purpose under the offer")
+end)
+
 add("available installs list their dependencies", function()
   local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
   local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
@@ -948,6 +1018,8 @@ add("check populates available without touching jobs", function()
   eq(#jobs, 0, "nothing to update")
   eq(#u.available, 1, "new plugin offered")
   eq(u.available[1].xml, "extra_plugin.xml")
+  assert(u.manifest, "manifest retained for listing")
+  eq(u.manifest.serial, 2026010102)
 end)
 
 local failures = 0

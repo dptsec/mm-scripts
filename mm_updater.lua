@@ -49,7 +49,7 @@ function M.parse_manifest(text, opts)
       serial, opts.min_serial)
   end
 
-  local plugins, current = {}, nil
+  local plugins, purposes, current = {}, {}, nil
   for line in string.gmatch(body, "[^\n]+") do
     local id, xml = string.match(line, "^plugin (%x+) (%S+)$")
     if id then
@@ -67,12 +67,16 @@ function M.parse_manifest(text, opts)
         end
         current.files[#current.files + 1] =
           { name = name, sha256 = string.lower(sha), size = tonumber(size) }
+      else
+        local pid, text = string.match(line, "^purpose (%x+) (.+)$")
+        if pid then purposes[pid] = text end
+        -- other line types are ignored: future manifest versions may add some
       end
-      -- other line types are ignored: future manifest versions may add some
     end
   end
   for _, p in ipairs(plugins) do
     if #p.files == 0 then return nil, "plugin with no files: " .. p.id end
+    p.purpose = purposes[p.id]
   end
   return { serial = serial, plugins = plugins }
 end
@@ -254,7 +258,8 @@ function U:plan_available(manifest)
       for _, f in ipairs(p.files) do
         if f.name ~= p.xml then deps[#deps + 1] = f.name end
       end
-      avail[#avail + 1] = { id = p.id, xml = p.xml, plugin = p, deps = deps }
+      avail[#avail + 1] =
+        { id = p.id, xml = p.xml, plugin = p, deps = deps, purpose = p.purpose }
     end
   end
   return avail
@@ -625,6 +630,7 @@ function U:check(done_cb)
       })
       if not manifest then return done_cb(nil, err) end
       self.cl.set_var("last_serial", tostring(manifest.serial))
+      self.manifest = manifest
 
       local jobs = self:plan_modern(manifest)
       self.available = self:plan_available(manifest)
@@ -696,6 +702,44 @@ function U:report()
       end
       self.cl.link(string.format("* %s%s -- ", entry.xml, rely),
         "install plugin " .. entry.id)
+      if entry.purpose then
+        self.cl.note("dim", "    " .. entry.purpose)
+      end
+    end
+  end
+end
+
+-- Everything the manifest offers, with local state -- run after check()
+-- so self.manifest and self.jobs are fresh.
+function U:list()
+  local manifest = self.manifest
+  if not manifest then return end
+  local pending = {}
+  for _, job in ipairs(self.jobs or {}) do
+    if job.id then pending[job.id] = true end
+  end
+  local installed = installed_set(self.cl)
+  self.cl.note("text", "Plugins in the update manifest:")
+  for _, p in ipairs(manifest.plugins) do
+    local deps = {}
+    for _, f in ipairs(p.files) do
+      if f.name ~= p.xml then deps[#deps + 1] = f.name end
+    end
+    if not installed[p.id] then
+      self.cl.link(string.format("* %s -- not installed; ", p.xml),
+        "install plugin " .. p.id)
+    elseif pending[p.id] then
+      self.cl.link(string.format("* %s -- update pending; ",
+        self.cl.plugin_info(p.id, 1) or p.xml), "update plugin " .. p.id)
+    else
+      self.cl.note("text", string.format("* %s -- installed, up to date",
+        self.cl.plugin_info(p.id, 1) or p.xml))
+    end
+    if p.purpose then
+      self.cl.note("dim", "    " .. p.purpose)
+    end
+    if #deps > 0 then
+      self.cl.note("dim", "    relies on: " .. table.concat(deps, ", "))
     end
   end
 end

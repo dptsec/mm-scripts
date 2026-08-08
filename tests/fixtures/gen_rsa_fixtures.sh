@@ -41,15 +41,18 @@ make_manifest manifest_b.txt 2026010101
   printf 'mm-manifest 1\n'
   printf 'serial 2026010102\n'
   printf 'plugin aaaaaaaaaaaaaaaaaaaaaaaa demo_plugin.xml\n'
+  printf 'purpose aaaaaaaaaaaaaaaaaaaaaaaa a demo plugin\n'
   printf 'file demo_plugin.xml %s 11\n' \
     "$(printf 'demo-xml-v1' | shasum -a 256 | cut -d' ' -f1)"
   printf 'file demo_module.lua %s 11\n' \
     "$(printf 'demo-lua-v1' | shasum -a 256 | cut -d' ' -f1)"
   printf 'plugin dddddddddddddddddddddddd extra_plugin.xml\n'
+  printf 'purpose dddddddddddddddddddddddd an extra plugin\n'
   printf 'file extra_plugin.xml %s 12\n' \
     "$(printf 'extra-xml-v1' | shasum -a 256 | cut -d' ' -f1)"
   printf 'file extra_module.lua %s 12\n' \
     "$(printf 'extra-lua-v1' | shasum -a 256 | cut -d' ' -f1)"
+  printf 'purpose ffffffffffffffffffffffff purpose for an unknown plugin is ignored\n'
 } > manifest_c.txt.body
 sig=$(openssl dgst -sha256 -sign test_key.pem manifest_c.txt.body | openssl base64 -A)
 cat manifest_c.txt.body > manifest_c.txt

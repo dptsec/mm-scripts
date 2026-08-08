@@ -104,6 +104,11 @@ folder as the plugin.
   shared dependencies list every plugin that uses them. Plugins relying on
   an updated file are reloaded automatically, even when only the shared
   file changed.
+- `update plugins list` — every plugin the manifest offers, each with its
+  purpose, its dependencies, and its state (up to date, update pending with
+  an update link, or not installed with an install link). Purposes come from
+  each plugin's own `purpose` attribute and travel inside the signed
+  manifest.
 - `update plugin <name|id>` — update the plugins matching a name or plugin ID.
 - `update plugins lastlist` — install everything from the last check.
 - `install plugin <name|id>` — install a listed plugin you don't have yet.
