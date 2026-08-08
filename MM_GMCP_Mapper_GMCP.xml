@@ -128,10 +128,11 @@ Syntax:
 * mapper maintenance  - show a list of advanced maintenance & privacy aliases
 
 
-Authors: Nick Gammon, Ruthgul (maintained by Ruthgul)
+Authors: Nick Gammon, Ruthgul, Ferdinand (maintained by Ferdinand)
 
 Latest version:
-http://github.com/MateriaMagicaLLC/mm-mushclient-scripts
+https://github.com/dptsec/mm-scripts
+(updates arrive through the mm_updater plugin)
 
 ]]>
 
@@ -1148,22 +1149,6 @@ function is_plugin_present(name, id)
   end
 
   return res
-end
-
-
-function plugin_update_url()
-  local t = {
-    "https://raw.githubusercontent.com/MateriaMagicaLLC/mm-mushclient-scripts/master/src/MM_GMCP_Mapper_GMCP.xml",
-  }
-  return (table.concat(t, ";"))
-end
-
-
-function plugin_update_aux_url()
-  local t = {
-    "https://raw.githubusercontent.com/MateriaMagicaLLC/mm-mushclient-scripts/master/src/mm_mapper.lua,MUSH/lua",
-  }
-  return (table.concat(t, ";"))
 end
 
 
