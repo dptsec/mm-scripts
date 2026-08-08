@@ -120,6 +120,54 @@ add("partial sends complete", function()
   assert(fake.requests[1]:find("\r\n\r\n$"), "request terminator sent")
 end)
 
+add("connection refused", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { refuse = true })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/", callback = function(r) got = r end }
+  pump(fake, client, 5)
+  assert(got, "failed fast, before any timeout")
+  eq(got.ok, false)
+  assert(got.err:find("connect failed"), "err is connect failure: " .. tostring(got.err))
+end)
+
+add("timeout on silent server", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { hang = true })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/", timeout = 2,
+    callback = function(r) got = r end }
+  pump(fake, client, 30) -- 3 simulated seconds
+  eq(got.ok, false)
+  assert(got.err:find("timed out"), "err is timeout: " .. tostring(got.err))
+end)
+
+add("cancel suppresses callback and closes socket", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { hang = true })
+  local client = http.new{ socket = fake.lib }
+  local got
+  local handle = client:request{ url = "http://ooc.dune.net/",
+    callback = function(r) got = r end }
+  pump(fake, client, 3)
+  client:cancel(handle)
+  pump(fake, client, 30)
+  eq(got, nil, "no callback after cancel")
+  eq(client:busy(), false)
+  eq(fake.sockets[1].closed, true, "socket closed")
+end)
+
+add("bad url fails synchronously", function()
+  local client = http.new{ socket = fake_socket.new().lib }
+  local got
+  client:request{ url = "not a url", callback = function(r) got = r end }
+  eq(got.ok, false)
+  assert(got.err:find("bad url"), "bad url error")
+  eq(client:busy(), false)
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)

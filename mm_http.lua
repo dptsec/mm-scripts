@@ -244,4 +244,25 @@ function client_methods:busy()
   return #self.requests > 0
 end
 
+function client_methods:cancel(handle)
+  for i = #self.requests, 1, -1 do
+    if self.requests[i] == handle then
+      handle.done = true
+      handle.callback = nil
+      if handle.sock then handle.sock:close() end
+      table.remove(self.requests, i)
+    end
+  end
+end
+
+function client_methods:cancel_all()
+  for i = #self.requests, 1, -1 do
+    local req = self.requests[i]
+    req.done = true
+    req.callback = nil
+    if req.sock then req.sock:close() end
+    self.requests[i] = nil
+  end
+end
+
 return M
