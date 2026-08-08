@@ -1,0 +1,333 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+   name="mm_updater"
+   author="Ferdinand"
+   id="a8e5cfb9554e916edd66f8d1"
+   language="Lua"
+   purpose="keeps Materia Magica plugins up to date"
+   save_state="y"
+   date_written="2026-08-08 12:00:00"
+   requires="4.71"
+   version="1.0">
+
+<description trim="y">
+
+<![CDATA[
+
+Checks installed plugins against a signed update manifest and installs
+updates after your confirmation. Also updates old plugins that speak the
+plugins_updater_v3 protocol.
+
+ * update plugins           -- check everything, list what is outdated
+ * update plugin <name|id>  -- update plugins matching a name or ID
+ * update plugins lastlist  -- install everything from the last check
+
+Checks run automatically about once a day; nothing installs without you
+asking. Updates are verified against SHA-256 hashes from an RSA-signed
+manifest before touching disk; the previous version of every file is kept
+next to it with an .old suffix.
+
+Keep mm_updater.lua, mm_crypto.lua and mm_http.lua in the same folder as
+this plugin. Requires TLS: always available on MacMUSH; on MUSHclient
+install LuaSec.
+
+]]>
+
+</description>
+
+</plugin>
+
+<aliases>
+  <alias
+    enabled="y"
+    match="^update plugins$"
+    regexp="y"
+    ignore_case="y"
+    sequence="100"
+    group="mm_updater"
+    script="updater_cmd_check"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^update plugins lastlist$"
+    regexp="y"
+    ignore_case="y"
+    sequence="90"
+    group="mm_updater"
+    script="updater_cmd_lastlist"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^update plugin (?!s lastlist)(.+)$"
+    regexp="y"
+    ignore_case="y"
+    sequence="100"
+    group="mm_updater"
+    script="updater_cmd_one"
+  >
+  </alias>
+  <alias
+    enabled="y"
+    match="^mm_updater(?: help)?$"
+    regexp="y"
+    ignore_case="y"
+    sequence="100"
+    script="updater_cmd_help"
+  >
+  </alias>
+</aliases>
+
+<timers>
+  <timer
+    enabled="y"
+    active_closed="y"
+    name="updater_daily_gate"
+    hour="1"
+    second="0.00"
+    offset_second="0.00"
+    script="updater_auto_check"
+  >
+  </timer>
+</timers>
+
+<script>
+
+<![CDATA[
+
+local COLOURS = {
+  text = "silver",
+  dim = "gray",
+  link = "cornflowerblue",
+  error = "tomato",
+  background = "",
+}
+
+local function file_exists(path)
+  local f = io.open(path, "rb")
+  if f then f:close() return true end
+  return false
+end
+
+local plugin_dir = GetPluginInfo(GetPluginID(), 20) or ""
+for _, need in ipairs({ "mm_http.lua", "mm_crypto.lua", "mm_updater.lua" }) do
+  assert(file_exists(plugin_dir .. need),
+    "mm_updater: " .. need .. " must sit next to mm_updater.xml")
+end
+package.loaded.mm_http = nil
+package.loaded.mm_crypto = nil
+package.loaded.mm_updater = nil
+package.path = plugin_dir .. "?.lua;" .. package.path
+local http_lib = require "mm_http"
+local crypto = require "mm_crypto"
+local updater = require "mm_updater"
+
+-- the client's native digests are faster than pure Lua when present;
+-- use_native vets them against known vectors before trusting them
+crypto.use_native({
+  sha256 = utils and utils.sha256,
+  md5 = utils and utils.md5,
+})
+
+local PUBKEY_N = "CBD7A551FDD99B94360FF669139BCA20C7ADDD6F9C094EB67A7FBADF2CB5F35856A5366DCD235D0AB95A4D21B5B88714040DC16400915F989D6B017110B6789C9873A376B098468F97D938F6A88CEE5BC60165C6A9C7A89BB7DA94272988A70D4AC818FC2104B28243DB258832FEEC0999D4EADC22143EDBD25F5624520BFDBFAD90E7AFCF72526BB60925FBA38272616556DD26A6CF0F7C211D8349E845C9F7AC7083B150C1E887A22376C129726DC28812B3E4C008D8C7733E18D88F08F91B8388B5A068DE24B194742C655369C4E7A7F6F71F74771CB39F38229A599C52E14BB0E7F34B91833058631003A34E27390E7A38607AE556369B880F3B0E493075"
+
+local CHECK_EVERY = 24 * 60 * 60      -- seconds between automatic checks
+
+local function note(style, text)
+  ColourNote(COLOURS[style] or COLOURS.text, COLOURS.background, text)
+end
+
+local function link(text, command)
+  ColourTell(COLOURS.text, COLOURS.background, text)
+  Hyperlink(command, command, "", COLOURS.link, COLOURS.background, false)
+  Note("")
+end
+
+local fs = {}
+
+function fs.read(path)
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  local s = f:read("*a")
+  f:close()
+  return s
+end
+
+function fs.write(path, data)
+  local f, err = io.open(path, "wb")
+  if not f then return nil, err end
+  f:write(data)
+  f:close()
+  return true
+end
+
+function fs.rename(old, new) return os.rename(old, new) end
+function fs.remove(path) return os.remove(path) end
+fs.exists = file_exists
+
+local WINDOWS = string.sub(package.config, 1, 1) == "\\"
+
+function fs.mkdir(path)
+  local ok, lfs = pcall(require, "lfs")
+  if ok and lfs and lfs.attributes then
+    if lfs.attributes(path, "mode") == "directory" then return true end
+  end
+  if WINDOWS then
+    os.execute('cmd /C md "' .. string.gsub(path, "/", "\\") .. '" 2>nul')
+  else
+    os.execute('mkdir -p "' .. path .. '"')
+  end
+  return true
+end
+
+local cl = {}
+cl.note = note
+cl.link = link
+function cl.plugin_list() return GetPluginList() or {} end
+function cl.plugin_info(id, n) return GetPluginInfo(id, n) end
+function cl.call_plugin(id, fn) return CallPlugin(id, fn) end
+function cl.reload_plugin(id) return ReloadPlugin(id) end
+function cl.get_var(name) return GetVariable(name) end
+function cl.set_var(name, value)
+  SetVariable(name, value)
+  SaveState()
+end
+function cl.app_dir() return GetInfo(56) end
+
+local http = http_lib.new()
+local u = updater.new({
+  http = http,
+  crypto = crypto,
+  fs = fs,
+  cl = cl,
+  config = {
+    base_url = "https://raw.githubusercontent.com/dptsec/mm-scripts/main/",
+    pubkey_n = PUBKEY_N,
+    legacy_manifest_url = "https://raw.githubusercontent.com/MateriaMagicaLLC/mm-mushclient-scripts/master/text/plugins_versions.txt",
+    self_id = GetPluginID(),
+  },
+})
+
+local pump_scheduled = false
+
+local function schedule_pump()
+  if pump_scheduled then return end
+  pump_scheduled = true
+  DoAfterSpecial(0.2, "updater_pump()", sendto.script)
+end
+
+function updater_pump()
+  pump_scheduled = false
+  if http:tick() then
+    schedule_pump()
+  end
+end
+
+local function require_tls()
+  if http:tls_available() then return true end
+  note("error",
+    "mm_updater: HTTPS unavailable -- install LuaSec to use this plugin")
+  return false
+end
+
+local function finish_install(summary)
+  if summary.self_updated then
+    local code = ReloadPlugin(GetPluginID())
+    if code ~= 0 then
+      note("text", "mm_updater: please reinstall me by hand:")
+      note("text", "  File -> Plugins, select mm_updater, click Reinstall")
+    end
+  end
+end
+
+function updater_cmd_check()
+  if not require_tls() then return end
+  u:check(function(jobs, err)
+    if err then
+      note("error", "mm_updater: " .. err)
+    elseif #jobs == 0 then
+      note("text", "mm_updater: all plugins are up to date")
+    else
+      u:report()
+    end
+  end)
+  schedule_pump()
+end
+
+function updater_cmd_lastlist()
+  if not require_tls() then return end
+  u:install_all(finish_install)
+  schedule_pump()
+end
+
+function updater_cmd_one(name, line, wildcards)
+  if not require_tls() then return end
+  local what = string.lower(wildcards[1] or "")
+  u:check(function(jobs, err)
+    if err then
+      note("error", "mm_updater: " .. err)
+      return
+    end
+    local matched = {}
+    for _, job in ipairs(jobs) do
+      if job.id == wildcards[1]
+          or string.find(string.lower(job.name), what, 1, true) then
+        matched[#matched + 1] = job
+      end
+    end
+    if #matched == 0 then
+      note("text", string.format(
+        "mm_updater: no pending updates match '%s'", wildcards[1]))
+      return
+    end
+    u.jobs = matched
+    u:install_all(finish_install)
+  end)
+  schedule_pump()
+end
+
+function updater_cmd_help()
+  ColourNote("silver", "black", GetPluginInfo(GetPluginID(), 3))
+end
+
+function updater_auto_check()
+  -- daily-gate timer fires hourly; only act when a day has really passed
+  local last = tonumber(GetVariable("last_check") or "0") or 0
+  if os.time() - last < CHECK_EVERY then return end
+  if not http:tls_available() then return end
+  cl.set_var("last_check", tostring(os.time()))
+  u:check(function(jobs, err)
+    if not err and jobs and #jobs > 0 then
+      u:report()
+    end
+  end)
+  schedule_pump()
+end
+
+function OnPluginInstall()
+  note("dim", "mm_updater: type 'mm_updater help' for info")
+  DoAfterSpecial(15, "updater_auto_check()", sendto.script)
+end
+
+function OnPluginConnect()
+  DoAfterSpecial(15, "updater_auto_check()", sendto.script)
+end
+
+function OnPluginClose()
+  u:cancel()
+end
+
+function OnPluginDisable()
+  u:cancel()
+end
+
+]]>
+
+</script>
+
+</muclient>
