@@ -235,4 +235,164 @@ function M.md5_hex(s)
   return to_hex(md5_pure(s))
 end
 
+------------------------------------------------------------------
+-- Bignum (base-2^16 limbs, little-endian arrays) + RSA verify.
+-- 16-bit limbs keep every intermediate product exact in doubles.
+------------------------------------------------------------------
+
+local BASE = 65536
+
+local function bn_trim(a)
+  while #a > 1 and a[#a] == 0 do a[#a] = nil end
+  return a
+end
+
+local function bn_from_bytes(s)          -- big-endian bytes -> limbs
+  local a, limb, mult = {}, 0, 1
+  for i = #s, 1, -1 do
+    limb = limb + string.byte(s, i) * mult
+    mult = mult * 256
+    if mult == BASE then
+      a[#a + 1] = limb
+      limb, mult = 0, 1
+    end
+  end
+  if mult > 1 then a[#a + 1] = limb end
+  if #a == 0 then a[1] = 0 end
+  return bn_trim(a)
+end
+
+local function bn_to_bytes(a, len)       -- fixed-width big-endian bytes
+  local out = {}
+  for i = 1, #a do
+    out[2 * i - 1] = string.char(a[i] % 256)
+    out[2 * i] = string.char(math.floor(a[i] / 256))
+  end
+  local s = string.reverse(table.concat(out))
+  if #s > len then
+    -- only leading zero bytes may be dropped
+    local extra = string.sub(s, 1, #s - len)
+    if string.find(extra, "[^%z]") then return nil end
+    return string.sub(s, #s - len + 1)
+  end
+  return string.rep("\0", len - #s) .. s
+end
+
+local function bn_cmp(a, b)
+  if #a ~= #b then return #a < #b and -1 or 1 end
+  for i = #a, 1, -1 do
+    if a[i] ~= b[i] then return a[i] < b[i] and -1 or 1 end
+  end
+  return 0
+end
+
+local function bn_mul(a, b)
+  local r = {}
+  for i = 1, #a + #b do r[i] = 0 end
+  for i = 1, #a do
+    local carry = 0
+    local ai = a[i]
+    for j = 1, #b do
+      local acc = r[i + j - 1] + ai * b[j] + carry
+      carry = math.floor(acc / BASE)
+      r[i + j - 1] = acc % BASE
+    end
+    r[i + #b] = r[i + #b] + carry
+  end
+  return bn_trim(r)
+end
+
+-- Knuth TAOCP vol 2 Algorithm D, remainder only. Requires the divisor's
+-- top limb >= BASE/2; RSA moduli always satisfy this (top bit set).
+local function bn_mod(u, v)
+  local n = #v
+  assert(v[n] >= BASE / 2, "bn_mod: divisor not normalized")
+  if bn_cmp(u, v) < 0 then
+    local c = {}
+    for i = 1, #u do c[i] = u[i] end
+    return c
+  end
+  local r = {}
+  for i = 1, #u do r[i] = u[i] end
+  r[#u + 1] = 0
+  for j = #u - n + 1, 1, -1 do
+    local top = r[j + n] * BASE + r[j + n - 1]
+    local qhat = math.floor(top / v[n])
+    if qhat > BASE - 1 then qhat = BASE - 1 end
+    -- multiply-subtract qhat*v from r at offset j-1
+    local borrow = 0
+    for i = 1, n do
+      local p = qhat * v[i] + borrow
+      local pl = p % BASE
+      borrow = math.floor(p / BASE)
+      local d = r[j + i - 1] - pl
+      if d < 0 then
+        d = d + BASE
+        borrow = borrow + 1
+      end
+      r[j + i - 1] = d
+    end
+    local d = r[j + n] - borrow
+    while d < 0 do                        -- qhat was too large: add v back
+      qhat = qhat - 1
+      local carry = 0
+      for i = 1, n do
+        local s2 = r[j + i - 1] + v[i] + carry
+        r[j + i - 1] = s2 % BASE
+        carry = math.floor(s2 / BASE)
+      end
+      d = d + carry
+    end
+    r[j + n] = d
+  end
+  for i = n + 1, #r do r[i] = nil end
+  return bn_trim(r)
+end
+
+local function bn_powmod_65537(base, n)
+  local r = bn_mod(base, n)
+  for _ = 1, 16 do
+    r = bn_mod(bn_mul(r, r), n)           -- r = base^(2^16) after the loop
+  end
+  return bn_mod(bn_mul(r, bn_mod(base, n)), n)
+end
+
+-- test hook: a mod n on hex strings (lowercase hex out, no leading zeros)
+function M._bn_mod_hex(a_hex, n_hex)
+  local a = bn_from_bytes(M.hex_decode(#a_hex % 2 == 1 and "0" .. a_hex or a_hex))
+  local n = bn_from_bytes(M.hex_decode(#n_hex % 2 == 1 and "0" .. n_hex or n_hex))
+  local r = bn_mod(a, n)
+  local parts = {}
+  for i = #r, 1, -1 do parts[#parts + 1] = string.format("%04x", r[i]) end
+  local hex = string.gsub(table.concat(parts), "^0*", "")
+  if hex == "" then hex = "0" end
+  return hex
+end
+
+-- ASN.1 DigestInfo header for SHA-256 (RFC 8017, section 9.2 notes)
+local DIGESTINFO_SHA256 = string.char(
+  0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+  0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20)
+
+-- PKCS#1 v1.5 verification by exact reconstruction: build the one valid
+-- encoded message for this hash and compare all bytes. No padding parser,
+-- so no padding-parser bugs.
+function M.rsa_verify(n_hex, sig, message)
+  local n_bytes = M.hex_decode(string.lower(n_hex))
+  if not n_bytes then return false end
+  local klen = #n_bytes
+  if type(sig) ~= "string" or #sig ~= klen then return false end
+  local n = bn_from_bytes(n_bytes)
+  local s = bn_from_bytes(sig)
+  if bn_cmp(s, n) >= 0 then return false end
+  local em = bn_to_bytes(bn_powmod_65537(s, n), klen)
+  if not em then return false end
+  local digest = M.sha256_bin(message)
+  local pslen = klen - 3 - #DIGESTINFO_SHA256 - #digest
+  if pslen < 8 then return false end
+  local expected = "\0\1" .. string.rep("\255", pslen) .. "\0"
+    .. DIGESTINFO_SHA256 .. digest
+  return em == expected
+end
+
 return M
