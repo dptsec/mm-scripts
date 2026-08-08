@@ -314,6 +314,196 @@ add("plan_modern dedups shared files across jobs", function()
   eq(count, 1, "shared file downloaded once")
 end)
 
+local function fake_http()
+  local h = { queue = {} }
+  function h:request(opts)
+    table.insert(self.queue, opts)
+    return opts
+  end
+  function h:respond(resp)   -- answer the oldest pending request
+    local o = table.remove(self.queue, 1)
+    assert(o, "no pending request")
+    o.callback(resp)
+  end
+  function h:pending_url()
+    return self.queue[1] and self.queue[1].url
+  end
+  function h:tick() return #self.queue > 0 end
+  function h:busy() return #self.queue > 0 end
+  function h:cancel_all() self.queue = {} end
+  return h
+end
+
+local function ok_resp(body)
+  return { ok = true, status = 200, body = body }
+end
+
+local function job_for(u, id, name, dir, files)
+  return { id = id, name = name, legacy = false, dir = dir, files = files }
+end
+
+local function sha_file(u, name, dir, content)
+  return {
+    name = name, url = BASE .. name, path = dir .. name,
+    hash_kind = "sha256", hash = crypto.sha256_hex(content), size = #content,
+  }
+end
+
+add("install_all: happy path writes, backs up, reloads", function()
+  local fs = fake_fs({ ["/plug/demo_plugin.xml"] = "old xml" })
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  u.jobs = { job_for(u, "aaaaaaaaaaaaaaaaaaaaaaaa", "demo", "/plug/", {
+    sha_file(u, "demo_plugin.xml", "/plug/", "new xml"),
+    sha_file(u, "demo_module.lua", "/plug/", "new lua"),
+  }) }
+  local summary
+  u:install_all(function(s) summary = s end)
+  eq(http:pending_url(), BASE .. "demo_plugin.xml", "sequential download")
+  http:respond(ok_resp("new xml"))
+  eq(http:pending_url(), BASE .. "demo_module.lua")
+  http:respond(ok_resp("new lua"))
+
+  assert(summary, "done callback fired")
+  eq(summary.ok, 1); eq(summary.failed, 0); eq(summary.self_updated, false)
+  eq(fs.files["/plug/demo_plugin.xml"], "new xml")
+  eq(fs.files["/plug/demo_plugin.xml.old"], "old xml", "backup kept")
+  eq(fs.files["/plug/demo_module.lua"], "new lua", "fresh file installed")
+  eq(fs.files["/plug/demo_plugin.xml.new"], nil, "no staging leftovers")
+  eq(cl.reloaded[1], "aaaaaaaaaaaaaaaaaaaaaaaa")
+  eq(u:busy(), false)
+end)
+
+add("install_all: checksum mismatch writes nothing", function()
+  local fs = fake_fs({ ["/plug/demo_plugin.xml"] = "old xml" })
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  local f = sha_file(u, "demo_plugin.xml", "/plug/", "expected content")
+  u.jobs = { job_for(u, "aaaaaaaaaaaaaaaaaaaaaaaa", "demo", "/plug/", { f }) }
+  local summary
+  u:install_all(function(s) summary = s end)
+  http:respond(ok_resp(string.rep("x", #("expected content"))))  -- right size, wrong bytes
+
+  eq(summary.failed, 1); eq(summary.ok, 0)
+  eq(fs.files["/plug/demo_plugin.xml"], "old xml", "untouched")
+  eq(#cl.reloaded, 0, "no reload")
+  local said = table.concat(cl.notes, "\n")
+  assert(string.find(said, "checksum mismatch"), said)
+end)
+
+add("install_all: size mismatch rejected before hashing", function()
+  local fs = fake_fs({})
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  u.jobs = { job_for(u, "aaaaaaaaaaaaaaaaaaaaaaaa", "demo", "/plug/", {
+    sha_file(u, "demo_plugin.xml", "/plug/", "short") }) }
+  local summary
+  u:install_all(function(s) summary = s end)
+  http:respond(ok_resp("this is far too long"))
+  eq(summary.failed, 1)
+  eq(fs.files["/plug/demo_plugin.xml"], nil)
+end)
+
+add("install_all: one job failing does not stop the next", function()
+  local fs = fake_fs({})
+  local cl = fake_cl({
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "one", dir = "/plug/" },
+    { id = "cccccccccccccccccccccccc", name = "two", dir = "/plug/" },
+  })
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  u.jobs = {
+    job_for(u, "aaaaaaaaaaaaaaaaaaaaaaaa", "one", "/plug/", {
+      sha_file(u, "one.xml", "/plug/", "one content") }),
+    job_for(u, "cccccccccccccccccccccccc", "two", "/plug/", {
+      sha_file(u, "two.xml", "/plug/", "two content") }),
+  }
+  local summary
+  u:install_all(function(s) summary = s end)
+  http:respond({ ok = false, err = "timed out" })     -- job 1 dies
+  http:respond(ok_resp("two content"))                -- job 2 proceeds
+  eq(summary.ok, 1); eq(summary.failed, 1)
+  eq(fs.files["/plug/two.xml"], "two content")
+  eq(cl.reloaded[1], "cccccccccccccccccccccccc")
+end)
+
+add("install_all: staging write failure leaves no leftovers", function()
+  local fs = fake_fs({ ["/plug/a.lua"] = "old a", ["/plug/b.lua"] = "old b" })
+  fs.fail_write["/plug/b.lua.new"] = true
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  u.jobs = { job_for(u, "aaaaaaaaaaaaaaaaaaaaaaaa", "demo", "/plug/", {
+    sha_file(u, "a.lua", "/plug/", "new a"),
+    sha_file(u, "b.lua", "/plug/", "new b"),
+  }) }
+  local summary
+  u:install_all(function(s) summary = s end)
+  http:respond(ok_resp("new a"))
+  http:respond(ok_resp("new b"))
+  eq(summary.failed, 1)
+  eq(fs.files["/plug/a.lua"], "old a")
+  eq(fs.files["/plug/b.lua"], "old b")
+  eq(fs.files["/plug/a.lua.new"], nil, "staged file cleaned up")
+  eq(#cl.reloaded, 0)
+end)
+
+add("install_all: swap failure restores already-swapped files", function()
+  local fs = fake_fs({ ["/plug/a.lua"] = "old a", ["/plug/b.lua"] = "old b" })
+  fs.fail_rename["/plug/b.lua"] = true       -- backing up b fails mid-swap
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  u.jobs = { job_for(u, "aaaaaaaaaaaaaaaaaaaaaaaa", "demo", "/plug/", {
+    sha_file(u, "a.lua", "/plug/", "new a"),
+    sha_file(u, "b.lua", "/plug/", "new b"),
+  }) }
+  local summary
+  u:install_all(function(s) summary = s end)
+  http:respond(ok_resp("new a"))
+  http:respond(ok_resp("new b"))
+  eq(summary.failed, 1)
+  eq(fs.files["/plug/a.lua"], "old a", "a restored from backup")
+  eq(fs.files["/plug/b.lua"], "old b", "b untouched")
+  eq(#cl.reloaded, 0)
+  local said = table.concat(cl.notes, "\n")
+  assert(string.find(said, "restored previous files"), said)
+end)
+
+add("install_all: self-update defers the reload to the glue", function()
+  local fs = fake_fs({})
+  local cl = fake_cl({ { id = "bbbbbbbbbbbbbbbbbbbbbbbb", name = "mm_updater", dir = "/plug/" } })
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  u.jobs = { job_for(u, "bbbbbbbbbbbbbbbbbbbbbbbb", "mm_updater", "/plug/", {
+    sha_file(u, "mm_updater.xml", "/plug/", "new self") }) }
+  local summary
+  u:install_all(function(s) summary = s end)
+  http:respond(ok_resp("new self"))
+  eq(summary.ok, 1)
+  eq(summary.self_updated, true)
+  eq(#cl.reloaded, 0, "module never reloads the plugin it runs in")
+  eq(fs.files["/plug/mm_updater.xml"], "new self")
+end)
+
+add("install_all: refuses to run twice concurrently", function()
+  local fs = fake_fs({})
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  u.jobs = { job_for(u, "aaaaaaaaaaaaaaaaaaaaaaaa", "demo", "/plug/", {
+    sha_file(u, "a.lua", "/plug/", "new a") }) }
+  u:install_all(nil)
+  eq(u:busy(), true)
+  u:install_all(nil)      -- must refuse, not crash or double-queue
+  eq(#http.queue, 1, "no duplicate downloads")
+  http:respond(ok_resp("new a"))
+  eq(u:busy(), false)
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)

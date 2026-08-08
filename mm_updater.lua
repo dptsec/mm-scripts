@@ -206,4 +206,150 @@ function U:plan_modern(manifest)
   return jobs
 end
 
+------------------------------------------------------------------
+-- Download + install (per-plugin all-or-nothing)
+------------------------------------------------------------------
+
+function U:busy()
+  return self.running == true
+end
+
+function U:cancel()
+  self.http:cancel_all()
+  self.running = false
+  self.jobs = nil
+end
+
+function U:_verify(f, body)
+  if f.size and #body ~= f.size then
+    return string.format("size mismatch (got %d bytes, want %d)", #body, f.size)
+  end
+  local got = (f.hash_kind == "sha256")
+    and self.crypto.sha256_hex(body) or self.crypto.md5_hex(body)
+  if got ~= f.hash then
+    return "checksum mismatch -- refusing to install"
+  end
+end
+
+function U:_rollback(job, swapped, why)
+  for j = 1, swapped do
+    local p = job.files[j].path
+    self.fs.remove(p)
+    self.fs.rename(p .. ".old", p)
+  end
+  for _, f in ipairs(job.files) do
+    self.fs.remove(f.path .. ".new")
+  end
+  self.cl.note("error", string.format(
+    "mm_updater: %s (%s) -- restored previous files", why, job.name))
+  return false
+end
+
+function U:_commit_job(job)
+  -- stage everything first: a failure here leaves the plugin untouched
+  for i, f in ipairs(job.files) do
+    if f.ensure_dir then self.fs.mkdir(f.ensure_dir) end
+    local ok, err = self.fs.write(f.path .. ".new", f.data)
+    if not ok then
+      for j = 1, i do self.fs.remove(job.files[j].path .. ".new") end
+      self.cl.note("error", string.format(
+        "mm_updater: cannot write %s.new (%s) -- %s left unchanged",
+        f.path, tostring(err), job.name))
+      return false
+    end
+  end
+  -- swap each file into place, keeping one .old backup
+  for i, f in ipairs(job.files) do
+    if self.fs.exists(f.path) then
+      self.fs.remove(f.path .. ".old")
+      if not self.fs.rename(f.path, f.path .. ".old") then
+        return self:_rollback(job, i - 1, "cannot back up " .. f.path)
+      end
+    end
+    if not self.fs.rename(f.path .. ".new", f.path) then
+      self.fs.rename(f.path .. ".old", f.path)
+      return self:_rollback(job, i - 1, "cannot replace " .. f.path)
+    end
+  end
+  -- reload; reloading the plugin this code runs in is the glue's job
+  if job.id == self.config.self_id then
+    self.cl.note("text", "mm_updater: updated itself -- reloading")
+  elseif job.id then
+    local code = self.cl.reload_plugin(job.id)
+    if code == 0 then
+      self.cl.note("text", string.format("mm_updater: %s updated", job.name))
+    else
+      self.cl.note("error", string.format(
+        "mm_updater: %s updated on disk but reload failed (code %s) -- reinstall it via File -> Plugins",
+        job.name, tostring(code)))
+    end
+  end
+  return true
+end
+
+function U:_run_job(job, done)
+  local fi = 0
+  local function next_file()
+    fi = fi + 1
+    local f = job.files[fi]
+    if not f then
+      return done(self:_commit_job(job))
+    end
+    self.cl.note("dim", "mm_updater: downloading " .. f.url)
+    self.http:request({ url = f.url, callback = function(resp)
+      if not resp.ok then
+        self.cl.note("error", string.format(
+          "mm_updater: %s: download failed (%s) -- %s skipped",
+          f.name, tostring(resp.err), job.name))
+        return done(false)
+      end
+      local err = self:_verify(f, resp.body)
+      if err then
+        self.cl.note("error", string.format(
+          "mm_updater: %s: %s -- %s skipped", f.name, err, job.name))
+        return done(false)
+      end
+      f.data = resp.body
+      next_file()
+    end })
+  end
+  next_file()
+end
+
+function U:install_all(done_cb)
+  if self.running then
+    self.cl.note("dim", "mm_updater: an update run is already in progress")
+    return
+  end
+  local jobs = self.jobs
+  if not jobs or #jobs == 0 then
+    self.cl.note("text", "mm_updater: nothing to update")
+    if done_cb then done_cb({ ok = 0, failed = 0, self_updated = false }) end
+    return
+  end
+  self.running = true
+  self.jobs = nil
+  local summary = { ok = 0, failed = 0, self_updated = false }
+  local ji = 0
+  local function next_job()
+    ji = ji + 1
+    local job = jobs[ji]
+    if not job then
+      self.running = false
+      if done_cb then done_cb(summary) end
+      return
+    end
+    self:_run_job(job, function(ok)
+      if ok then
+        summary.ok = summary.ok + 1
+        if job.id == self.config.self_id then summary.self_updated = true end
+      else
+        summary.failed = summary.failed + 1
+      end
+      next_job()
+    end)
+  end
+  next_job()
+end
+
 return M
