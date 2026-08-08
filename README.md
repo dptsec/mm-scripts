@@ -8,6 +8,7 @@ A collection of scripts for [Materia Magica](https://www.materiamagica.com), wri
 2. If you already use an MM mapper plugin, remove it first: **File → Plugins...**, select the old mapper in the list, and click **Remove**. This plugin keeps the original mapper's plugin ID, so the two can't be installed side by side — and for the same reason your saved mapper settings and map database carry over automatically.
 3. Click **Add...** in the same dialog and select `MM_GMCP_Mapper_GMCP.xml`.
 4. Optionally add `path_locator.xml` the same way. It reads the mapper's database, so install the mapper first.
+5. Optionally add `ooc_wiki.xml` the same way (keep `mm_http.lua` and `ooc_wiki.lua` next to it).
 
 If you were previously on a very old mapper whose database was named `<world address>_mapper.db`, the plugin will prompt you to run `mapper upgrade database` to convert it — the client may appear frozen for several minutes while it converts.
 
@@ -49,3 +50,24 @@ luajit tests/mm_mapper_find_paths_test.lua
 
 - `wherepath <directions>` — given a walk like `ne n n n n w u`, finds where it could start: every room flagged safe and library (the usual recall rooms) is tried as a starting point, and rooms from which the whole path can be walked are listed with their area, start, and destination. `wherepath nolib <directions>` relaxes the search to any safe room, and `wherepath reverse <directions>` inverts the path first (reversed order, opposite directions — `reverse w s s` searches `n n e`); the options combine in any order, and directions may be space- or comma-separated.
 - `closestpath <room name>` — finds the closest other areas to a named room, two ways: by walking the recorded exits outward (reporting step counts and the entry room), and — for rooms on the Alyria overworld — by grid distance to every recorded area entrance, which also covers areas the recorded walks never reach.
+
+## OOC wiki search
+
+[`ooc_wiki.xml`](ooc_wiki.xml) searches the [Order of Chaos Alliance wiki](https://ooc.dune.net) from inside the game (guest access; no login needed). Keep [`mm_http.lua`](mm_http.lua) and [`ooc_wiki.lua`](ooc_wiki.lua) in the same folder as the plugin — it loads both from its own directory.
+
+- `ooc <search term>` — full-text search. A single hit (or a hit whose title matches the term exactly) opens the page directly, rendered with colours in the output window; otherwise a numbered list is shown.
+- `ooc <number>` — open an entry from the last list (entries are also clickable).
+- `ooc list` — show the last result list again.
+
+Pages are fetched asynchronously — the client never blocks on the network. HTTPS is used when TLS is available: always on MacMUSH; on MUSHclient install [LuaSec](https://github.com/lunarmodules/luasec) to get HTTPS, otherwise the plugin falls back to plain HTTP.
+
+`mm_http.lua` is a reusable async HTTP/1.1 client for plugins (chunked and Content-Length aware — the wiki's server never closes HTTP/1.0-over-TLS connections, so completion cannot rely on server close). `ooc_wiki.lua` holds the pure search-parsing and wiki-markup rendering, testable outside the client.
+
+### Verification
+
+```sh
+luajit -bl mm_http.lua > /dev/null
+luajit -bl ooc_wiki.lua > /dev/null
+luajit tests/mm_http_test.lua
+luajit tests/ooc_wiki_test.lua
+```
