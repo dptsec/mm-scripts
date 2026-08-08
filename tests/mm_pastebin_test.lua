@@ -1,6 +1,8 @@
 package.path = "./?.lua;./tests/?.lua;" .. package.path
 
 local pastebin = require "mm_pastebin"
+local http = require "mm_http"
+local fake_socket = require "fake_socket"
 
 local tests = {}
 local function add(name, fn) table.insert(tests, { name = name, fn = fn }) end
@@ -112,6 +114,37 @@ add("parse_response garbage body", function()
     body = "<html>maintenance</html>" }
   eq(url, nil)
   assert(err and err:find("unexpected response"), tostring(err))
+end)
+
+add("upload round-trip over TLS", function()
+  local fake = fake_socket.new()
+  local url_body = "https://dpaste.org/K7xQ\n"
+  fake:host("dpaste.org", 443, { response =
+    "HTTP/1.1 200 OK\r\nContent-Length: " .. #url_body .. "\r\n\r\n" .. url_body })
+  local client = http.new{ socket = fake.lib, ssl = fake.ssl,
+    gettime = fake.lib.gettime }
+
+  local opts = pastebin.build_request("boss log line 1\nline 2", "3600")
+  local got
+  opts.callback = function(resp) got = resp end
+  client:request(opts)
+  for _ = 1, 50 do
+    client:tick()
+    fake:advance(0.1)
+  end
+
+  assert(got, "callback fired")
+  local url, err = pastebin.parse_response(got)
+  eq(err, nil); eq(url, "https://dpaste.org/K7xQ")
+  eq(client:busy(), false, "idle after completion")
+
+  local req = fake.requests[1]
+  assert(req:find("^POST /api/ HTTP/1%.1\r\n"), "request line")
+  assert(req:find("\r\nHost: dpaste%.org\r\n"), "host header")
+  assert(req:find("\r\nContent%-Type: application/x%-www%-form%-urlencoded\r\n"),
+    "content type")
+  assert(req:find("lexer=_text&format=url&expires=3600&content=boss%%20log", 1, false),
+    "form body")
 end)
 
 local failures = 0
