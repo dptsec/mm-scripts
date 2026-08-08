@@ -207,6 +207,60 @@ function U:plan_modern(manifest)
 end
 
 ------------------------------------------------------------------
+-- New-plugin installs (manifest plugins not installed locally)
+------------------------------------------------------------------
+
+function U:plan_available(manifest)
+  local avail = {}
+  local installed = installed_set(self.cl)
+  for _, p in ipairs(manifest.plugins) do
+    if not installed[p.id] then
+      avail[#avail + 1] = { id = p.id, xml = p.xml, plugin = p }
+    end
+  end
+  return avail
+end
+
+function U:find_available(what)
+  for _, entry in ipairs(self.available or {}) do
+    if entry.id == what
+        or string.find(string.lower(entry.xml), string.lower(what), 1, true) then
+      return entry
+    end
+  end
+end
+
+-- Planned at install time, not check time: hashes are re-checked against
+-- the target directory so files another install just wrote are skipped.
+function U:plan_install(entry)
+  local dir = self.config.self_dir
+  local files = {}
+  for _, f in ipairs(entry.plugin.files) do
+    local path = dir .. f.name
+    local data = self.fs.read(path)
+    if data == nil or self.crypto.sha256_hex(data) ~= f.sha256 then
+      files[#files + 1] = {
+        name = f.name,
+        url = self.config.base_url .. f.name,
+        path = path,
+        hash_kind = "sha256",
+        hash = f.sha256,
+        size = f.size,
+      }
+    end
+  end
+  return {
+    id = entry.id,
+    name = entry.xml,
+    xml = entry.xml,
+    install = true,
+    legacy = false,
+    dir = dir,
+    files = files,
+  }
+end
+
+------------------------------------------------------------------
 -- Download + install (per-plugin all-or-nothing)
 ------------------------------------------------------------------
 
@@ -271,8 +325,20 @@ function U:_commit_job(job)
       return self:_rollback(job, i - 1, "cannot replace " .. f.path)
     end
   end
-  -- reload; reloading the plugin this code runs in is the glue's job
-  if job.id == self.config.self_id then
+  -- activate: LoadPlugin for new installs, ReloadPlugin for updates;
+  -- reloading the plugin this code runs in is the glue's job
+  if job.install then
+    local code = self.cl.load_plugin(job.dir .. job.xml)
+    if code == 0 then
+      self.cl.note("text", string.format("mm_updater: %s installed", job.name))
+    else
+      self.cl.note("text", string.format(
+        "mm_updater: %s files are in place, but the client could not load it (code %s)",
+        job.name, tostring(code)))
+      self.cl.note("text", string.format(
+        "  add it by hand: File -> Plugins -> Add, select %s", job.dir .. job.xml))
+    end
+  elseif job.id == self.config.self_id then
     self.cl.note("text", "mm_updater: updated itself -- reloading")
   elseif job.id then
     local code = self.cl.reload_plugin(job.id)
@@ -485,6 +551,7 @@ function U:check(done_cb)
       self.cl.set_var("last_serial", tostring(manifest.serial))
 
       local jobs = self:plan_modern(manifest)
+      self.available = self:plan_available(manifest)
       local known = {}
       for _, p in ipairs(manifest.plugins) do known[p.id] = true end
       local cands = self:legacy_candidates(known)
@@ -520,14 +587,22 @@ end
 
 function U:report()
   local jobs = self.jobs
-  if not jobs or #jobs == 0 then return end
-  self.cl.note("text", "The following plugins have pending updates:")
-  for _, job in ipairs(jobs) do
-    local tag = job.legacy and " [legacy]" or ""
-    self.cl.link(string.format("* %s%s -- ", job.name, tag),
-      "update plugin " .. (job.id or job.name))
+  if jobs and #jobs > 0 then
+    self.cl.note("text", "The following plugins have pending updates:")
+    for _, job in ipairs(jobs) do
+      local tag = job.legacy and " [legacy]" or ""
+      self.cl.link(string.format("* %s%s -- ", job.name, tag),
+        "update plugin " .. (job.id or job.name))
+    end
+    self.cl.link("Update everything above: ", "update plugins lastlist")
   end
-  self.cl.link("Update everything above: ", "update plugins lastlist")
+  if self.available and #self.available > 0 then
+    self.cl.note("text", "Available to install (not installed yet):")
+    for _, entry in ipairs(self.available) do
+      self.cl.link(string.format("* %s -- ", entry.xml),
+        "install plugin " .. entry.id)
+    end
+  end
 end
 
 function U:install_all(done_cb)

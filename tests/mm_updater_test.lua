@@ -197,6 +197,12 @@ local function fake_cl(plugins)
     return 30011, nil   -- eNoSuchRoutine
   end
   function cl.reload_plugin(id) table.insert(cl.reloaded, id) return 0 end
+  cl.loaded = {}
+  cl.load_plugin_code = 0
+  function cl.load_plugin(path)
+    table.insert(cl.loaded, path)
+    return cl.load_plugin_code
+  end
   function cl.get_var(name) return cl.vars[name] end
   function cl.set_var(name, value) cl.vars[name] = value end
   function cl.app_dir() return "/mush/" end
@@ -213,6 +219,7 @@ local function make_updater(fs, cl, http)
       pubkey_n = PUBKEY_N,
       legacy_manifest_url = "https://raw.githubusercontent.com/MateriaMagicaLLC/mm-mushclient-scripts/master/text/plugins_versions.txt",
       self_id = "bbbbbbbbbbbbbbbbbbbbbbbb",
+      self_dir = "/plug/",
     },
   })
 end
@@ -684,6 +691,125 @@ add("check: manifest fetch failure reports an error", function()
   for _ = 1, 200 do http:tick(); fake:advance(0.1) end
   eq(jobs, nil)
   assert(err, "error surfaced")
+end)
+
+local MANIFEST_C = read_file("tests/fixtures/manifest_c.txt")
+
+add("plan_available lists manifest plugins not installed", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local u = make_updater(fake_fs({}), cl)
+  local avail = u:plan_available(manifest)
+  eq(#avail, 1, "only the uninstalled plugin is offered")
+  eq(avail[1].id, "dddddddddddddddddddddddd")
+  eq(avail[1].xml, "extra_plugin.xml")
+end)
+
+add("find_available matches id and name fragment", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  local u = make_updater(fake_fs({}), fake_cl({}))
+  u.available = u:plan_available(manifest)
+  assert(u:find_available("dddddddddddddddddddddddd"), "exact id")
+  assert(u:find_available("extra"), "name fragment")
+  assert(u:find_available("EXTRA_PLUGIN"), "case-insensitive")
+  eq(u:find_available("nonexistent"), nil)
+end)
+
+add("plan_install builds a fresh job against self_dir", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  -- shared module already current in the updater's dir; xml missing
+  local fs = fake_fs({ ["/plug/extra_module.lua"] = "extra-lua-v1" })
+  local u = make_updater(fs, fake_cl({}))
+  u.available = u:plan_available(manifest)
+  local job = u:plan_install(u:find_available("extra"))
+  eq(job.install, true)
+  eq(job.legacy, false)
+  eq(job.id, "dddddddddddddddddddddddd")
+  eq(job.xml, "extra_plugin.xml")
+  eq(job.dir, "/plug/")
+  eq(#job.files, 1, "current shared file skipped")
+  eq(job.files[1].name, "extra_plugin.xml")
+  eq(job.files[1].path, "/plug/extra_plugin.xml")
+  eq(job.files[1].hash_kind, "sha256")
+end)
+
+add("install job loads the plugin instead of reloading", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  local fs = fake_fs({})
+  local cl = fake_cl({})
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  u.available = u:plan_available(manifest)
+  u.jobs = { u:plan_install(u:find_available("extra")) }
+  local summary
+  u:install_all(function(s) summary = s end)
+  http:respond(ok_resp("extra-xml-v1"))
+  http:respond(ok_resp("extra-lua-v1"))
+  eq(summary.ok, 1); eq(summary.failed, 0)
+  eq(fs.files["/plug/extra_plugin.xml"], "extra-xml-v1")
+  eq(fs.files["/plug/extra_module.lua"], "extra-lua-v1")
+  eq(cl.loaded[1], "/plug/extra_plugin.xml", "LoadPlugin on the new xml")
+  eq(#cl.reloaded, 0, "no reload for a plugin that was never loaded")
+end)
+
+add("install job survives a LoadPlugin failure with instructions", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  local fs = fake_fs({})
+  local cl = fake_cl({})
+  cl.load_plugin_code = 30013
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  u.available = u:plan_available(manifest)
+  u.jobs = { u:plan_install(u:find_available("extra")) }
+  local summary
+  u:install_all(function(s) summary = s end)
+  http:respond(ok_resp("extra-xml-v1"))
+  http:respond(ok_resp("extra-lua-v1"))
+  eq(summary.ok, 1, "files installed even though load failed")
+  eq(fs.files["/plug/extra_plugin.xml"], "extra-xml-v1")
+  local said = table.concat(cl.notes, "\n")
+  assert(string.find(said, "File %-> Plugins"), "manual-add instructions: " .. said)
+end)
+
+add("report lists available installs separately from updates", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local u = make_updater(fake_fs({}), cl)
+  u.jobs = {}
+  u.available = u:plan_available(manifest)
+  u:report()
+  eq(#cl.links, 1, "no lastlist link when there are no pending updates")
+  eq(cl.links[1], "install plugin dddddddddddddddddddddddd")
+  local said = table.concat(cl.notes, "\n")
+  assert(string.find(said, "Available to install"), said)
+  assert(not string.find(said, "pending updates"), "no update header without updates")
+end)
+
+add("check populates available without touching jobs", function()
+  local fake = fake_socket.new()
+  local resp = function(body)
+    return "HTTP/1.1 200 OK\r\nContent-Length: " .. #body .. "\r\n\r\n" .. body
+  end
+  fake:host("raw.githubusercontent.com", 443, { routes = {
+    ["/dptsec/mm-scripts/main/manifest.txt"] = resp(MANIFEST_C),
+  } })
+  local http = require("mm_http").new{
+    socket = fake.lib, ssl = fake.ssl, gettime = fake.lib.gettime }
+  -- demo plugin installed and fully current; extra plugin absent
+  local fs = fake_fs({
+    ["/plug/demo_plugin.xml"] = "demo-xml-v1",
+    ["/plug/demo_module.lua"] = "demo-lua-v1",
+  })
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo",
+    dir = "/plug/", file = "/plug/demo_plugin.xml" } })
+  local u = make_updater(fs, cl, http)
+  local jobs, err
+  u:check(function(j, e) jobs, err = j, e end)
+  for _ = 1, 100 do http:tick(); fake:advance(0.1) end
+  eq(err, nil)
+  eq(#jobs, 0, "nothing to update")
+  eq(#u.available, 1, "new plugin offered")
+  eq(u.available[1].xml, "extra_plugin.xml")
 end)
 
 local failures = 0
