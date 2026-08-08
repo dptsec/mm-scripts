@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+   name="ooc_wiki"
+   author="Ferdinand"
+   id="9f3c2a8b1d4e5f6071829a4b"
+   language="Lua"
+   purpose="search and read the Order of Chaos alliance wiki in-game"
+   save_state="n"
+   date_written="2026-08-07 12:00:00"
+   requires="4.71"
+   version="1.0">
+
+<description trim="y">
+
+<![CDATA[
+
+Searches ooc.dune.net (guest access) and shows pages in the output window.
+
+ * ooc <search term>  -- search the wiki
+ * ooc <number>       -- open an entry from the last result list
+ * ooc list           -- show the last result list again
+
+One hit (or an exact title match) opens the page directly; otherwise a
+numbered list is shown and entries can be clicked or picked by number.
+
+Uses HTTPS when TLS is available (always on MacMUSH; on MUSHclient install
+LuaSec for HTTPS) and falls back to plain HTTP otherwise.
+
+Keep mm_http.lua and ooc_wiki.lua in the same folder as this plugin.
+
+]]>
+
+</description>
+
+</plugin>
+
+<aliases>
+  <alias
+    enabled="y"
+    match="^ooc(?: (.*))?$"
+    regexp="y"
+    ignore_case="y"
+    sequence="100"
+    group="ooc_wiki"
+    script="ooc_command"
+  >
+  </alias>
+</aliases>
+
+<script>
+
+<![CDATA[
+
+local COLOURS = {
+  heading = "gold",
+  bold = "white",
+  italic = "palegreen",
+  text = "silver",
+  dim = "gray",
+  link = "cornflowerblue",
+  pre = "wheat",
+  error = "tomato",
+  background = "black",
+}
+
+local function file_exists(path)
+  local f = io.open(path, "rb")
+  if f then f:close() return true end
+  return false
+end
+
+local plugin_dir = GetPluginInfo(GetPluginID(), 20) or ""
+assert(file_exists(plugin_dir .. "mm_http.lua"),
+  "ooc_wiki: mm_http.lua must sit next to ooc_wiki.xml")
+assert(file_exists(plugin_dir .. "ooc_wiki.lua"),
+  "ooc_wiki: ooc_wiki.lua must sit next to ooc_wiki.xml")
+package.loaded.mm_http = nil
+package.loaded.ooc_wiki = nil
+package.path = plugin_dir .. "?.lua;" .. package.path
+local http = require "mm_http"
+local wiki = require "ooc_wiki"
+
+local client
+local base_url
+local pending
+local last_term
+local last_results
+
+local function note(style, text)
+  ColourNote(COLOURS[style] or COLOURS.text, COLOURS.background, text)
+end
+
+local function emit(lines)
+  for _, line in ipairs(lines) do
+    for _, r in ipairs(line) do
+      if r.style == "link" and r.action then
+        Hyperlink(r.action, r.text, r.action, COLOURS.link, COLOURS.background, 0)
+      elseif r.style == "url" and r.url then
+        Hyperlink(r.url, r.text, r.url, COLOURS.link, COLOURS.background, 1)
+      else
+        ColourTell(COLOURS[r.style] or COLOURS.text, COLOURS.background, r.text)
+      end
+    end
+    Note("")
+  end
+end
+
+local pump_scheduled = false
+
+local function schedule_pump()
+  if pump_scheduled then return end
+  pump_scheduled = true
+  DoAfterSpecial(0.1, "ooc_pump()", sendto.script)
+end
+
+function ooc_pump()
+  pump_scheduled = false
+  if client and client:tick() then
+    schedule_pump()
+  end
+end
+
+local function ensure_client()
+  if client then return end
+  client = http.new()
+  base_url = client:tls_available() and "https://ooc.dune.net"
+                                     or "http://ooc.dune.net"
+end
+
+local function begin_request(opts)
+  if pending then client:cancel(pending) end
+  pending = client:request(opts)
+  schedule_pump()
+end
+
+local function show_page(index, others)
+  local result = last_results[index]
+  local page_url = base_url .. "/" .. result.href
+  begin_request{
+    url = base_url .. "/action=browse&id=" .. result.href .. "&raw=1",
+    callback = function(resp)
+      pending = nil
+      if not resp.ok then
+        note("error", "ooc: could not fetch '" .. result.title .. "': "
+          .. tostring(resp.err))
+        return
+      end
+      local raw = http.latin1_to_utf8(resp.body or "")
+      if string.match(raw, "^%s*$") then
+        note("error", "ooc: page '" .. result.title .. "' is empty or unreadable")
+        return
+      end
+      emit(wiki.render_page(result.title, raw, page_url))
+      if others and others > 0 then
+        note("dim", string.format("(%d other pages matched -- ooc list to see them)",
+          others))
+      end
+    end,
+  }
+end
+
+local function show_list()
+  if not last_results or #last_results == 0 then
+    note("dim", "ooc: no previous search -- try: ooc <search term>")
+    return
+  end
+  emit(wiki.render_results(last_term, last_results))
+end
+
+local function do_search(term)
+  begin_request{
+    url = base_url .. "/",
+    method = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body = "search=" .. http.urlencode(term) .. "&dosearch=1",
+    callback = function(resp)
+      pending = nil
+      if not resp.ok then
+        note("error", "ooc: search failed: " .. tostring(resp.err))
+        return
+      end
+      local found = wiki.parse_search(resp.body or "")
+      last_term = term
+      last_results = found.results
+      if found.count == 0 or #found.results == 0 then
+        note("dim", "ooc: no pages found for '" .. term .. "'")
+        return
+      end
+      local exact = wiki.find_exact(term, found.results)
+      if #found.results == 1 then
+        show_page(1, 0)
+      elseif exact then
+        show_page(exact, #found.results - 1)
+      else
+        show_list()
+      end
+    end,
+  }
+  note("dim", "ooc: searching for '" .. term .. "' ...")
+end
+
+function ooc_command(name, line, wildcards)
+  local arg = string.gsub(wildcards[1] or "", "^%s+", "")
+  arg = string.gsub(arg, "%s+$", "")
+  ensure_client()
+  if arg == "" then
+    note("dim", "ooc <search term> -- search ooc.dune.net"
+      .. " | ooc <number> -- open result | ooc list -- show results")
+    return
+  end
+  if string.lower(arg) == "list" then
+    show_list()
+    return
+  end
+  local index = tonumber(string.match(arg, "^(%d+)$"))
+  if index then
+    if not last_results or #last_results == 0 then
+      note("dim", "ooc: no previous search -- try: ooc <search term>")
+    elseif not last_results[index] then
+      note("error", string.format("ooc: pick 1-%d (or ooc list)", #last_results))
+    else
+      show_page(index, 0)
+    end
+    return
+  end
+  do_search(arg)
+end
+
+function OnPluginClose()
+  if client then client:cancel_all() end
+end
+
+function OnPluginDisable()
+  if client then client:cancel_all() end
+end
+
+]]>
+
+</script>
+
+</muclient>
