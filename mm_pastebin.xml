@@ -1,0 +1,295 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+
+<muclient>
+
+<plugin
+   name="mm_pastebin"
+   author="Ferdinand"
+   id="a493febe0ad0d44295ab78eb"
+   language="Lua"
+   purpose="send the clipboard to dpaste.org after confirmation"
+   save_state="n"
+   date_written="2026-08-08 12:00:00"
+   requires="4.71"
+   version="1.0">
+
+<description trim="y">
+
+<![CDATA[
+
+Uploads the clipboard to dpaste.org as an unlisted, expiring paste --
+after showing a confirmation window so nothing is sent by mistake.
+
+ * pastebin        -- preview & send the clipboard (expires in 1 week)
+ * pastebin 1h     -- expire in 1 hour   (also: 1d, 1w)
+ * pastebin once   -- paste self-destructs after the first view
+
+On success the paste URL is printed (clickable) and copied to the
+clipboard, ready to share.
+
+Requires TLS: always available on MacMUSH; on MUSHclient install LuaSec.
+Keep mm_http.lua and mm_pastebin.lua in the same folder as this plugin.
+
+]]>
+
+</description>
+
+</plugin>
+
+<aliases>
+  <alias
+    enabled="y"
+    match="^pastebin(?: (.+))?$"
+    regexp="y"
+    ignore_case="y"
+    sequence="100"
+    group="mm_pastebin"
+    script="pastebin_command"
+  >
+  </alias>
+</aliases>
+
+<script>
+
+<![CDATA[
+
+local COLOURS = {
+  text = "silver",
+  dim = "gray",
+  link = "cornflowerblue",
+  error = "tomato",
+  background = "",  -- empty string = the client's default output background
+}
+
+-- Miniwindow colours are numeric 0xBBGGRR (BGR); ColourNameToRGB is
+-- avoided because older MacMUSH builds only knew 16 colour names.
+local WIN = {
+  bg           = 0x1E1610,
+  frame        = 0x8A7A6A,
+  title        = 0xF0E8E0,
+  dim          = 0x9A9A9A,
+  preview      = 0xD0D0D0,
+  button       = 0x503C28,
+  button_frame = 0xA08860,
+  button_text  = 0xF0E8E0,
+}
+
+local function file_exists(path)
+  local f = io.open(path, "rb")
+  if f then f:close() return true end
+  return false
+end
+
+local plugin_dir = GetPluginInfo(GetPluginID(), 20) or ""
+assert(file_exists(plugin_dir .. "mm_http.lua"),
+  "mm_pastebin: mm_http.lua must sit next to mm_pastebin.xml")
+assert(file_exists(plugin_dir .. "mm_pastebin.lua"),
+  "mm_pastebin: mm_pastebin.lua must sit next to mm_pastebin.xml")
+package.loaded.mm_http = nil
+package.loaded.mm_pastebin = nil
+package.path = plugin_dir .. "?.lua;" .. package.path
+local http = require "mm_http"
+local pastebin = require "mm_pastebin"
+
+local WIN_ID = "z_pastebin_" .. GetPluginID()
+local FONT = "f"
+local PREVIEW_LINES = 12
+local PREVIEW_COLS = 78
+local PAD = 10
+
+local client
+local pending          -- in-flight request handle, nil when idle
+local snapshot         -- { content, expires_value, expires_label } awaiting confirm
+local window_open = false
+
+local function note(style, text)
+  ColourNote(COLOURS[style] or COLOURS.text, COLOURS.background, text)
+end
+
+local pump_scheduled = false
+
+local function schedule_pump()
+  if pump_scheduled then return end
+  pump_scheduled = true
+  DoAfterSpecial(0.1, "pastebin_pump()", sendto.script)
+end
+
+function pastebin_pump()
+  pump_scheduled = false
+  if client and client:tick() then
+    schedule_pump()
+  end
+end
+
+local function ensure_client()
+  if not client then client = http.new() end
+end
+
+local function close_window()
+  if window_open then
+    WindowShow(WIN_ID, false)
+    WindowDelete(WIN_ID)
+    window_open = false
+  end
+end
+
+local function output_font()
+  -- reuse the output window's font so the preview matches the game text
+  local name = GetInfo(20)
+  if type(name) ~= "string" or name == "" then name = "Courier New" end
+  local size = tonumber(GetInfo(21)) or 10
+  if size < 8 or size > 18 then size = 10 end
+  return name, size
+end
+
+local function show_window()
+  local pv = pastebin.preview(snapshot.content, PREVIEW_LINES, PREVIEW_COLS)
+  local font_name, font_size = output_font()
+
+  -- create tiny, set the font, measure, then create at the real size
+  WindowCreate(WIN_ID, 0, 0, 1, 1, miniwin.pos_center_all, 0, WIN.bg)
+  WindowFont(WIN_ID, FONT, font_name, font_size)
+  local line_h = WindowFontInfo(WIN_ID, FONT, 1)
+
+  local title = "Send clipboard to dpaste.org?"
+  local stats = string.format("%d line%s, %d bytes -- expires %s",
+    pv.total_lines, pv.total_lines == 1 and "" or "s",
+    pv.bytes, snapshot.expires_label)
+  local more = pv.truncated
+    and string.format("... +%d more lines", pv.total_lines - #pv.lines)
+    or nil
+
+  local text_w = math.max(
+    WindowTextWidth(WIN_ID, FONT, title, true),
+    WindowTextWidth(WIN_ID, FONT, stats, true))
+  for _, l in ipairs(pv.lines) do
+    text_w = math.max(text_w, WindowTextWidth(WIN_ID, FONT, l, true))
+  end
+  local width = math.min(600, math.max(420, text_w + PAD * 2))
+  local button_h = line_h + 8
+  local height = PAD + line_h * 2 + 6
+    + (#pv.lines + (more and 1 or 0)) * line_h
+    + 8 + button_h + PAD
+
+  WindowCreate(WIN_ID, 0, 0, width, height, miniwin.pos_center_all, 0, WIN.bg)
+  WindowFont(WIN_ID, FONT, font_name, font_size)
+  WindowRectOp(WIN_ID, miniwin.rect_frame, 0, 0, width, height, WIN.frame)
+
+  local y = PAD
+  WindowText(WIN_ID, FONT, title, PAD, y, 0, 0, WIN.title, true)
+  y = y + line_h
+  WindowText(WIN_ID, FONT, stats, PAD, y, 0, 0, WIN.dim, true)
+  y = y + line_h + 6
+  for _, l in ipairs(pv.lines) do
+    WindowText(WIN_ID, FONT, l, PAD, y, 0, 0, WIN.preview, true)
+    y = y + line_h
+  end
+  if more then
+    WindowText(WIN_ID, FONT, more, PAD, y, 0, 0, WIN.dim, true)
+    y = y + line_h
+  end
+  y = y + 8
+
+  local function button(id, label, x, callback, tooltip)
+    local w = WindowTextWidth(WIN_ID, FONT, label, true) + 24
+    WindowRectOp(WIN_ID, miniwin.rect_fill, x, y, x + w, y + button_h, WIN.button)
+    WindowRectOp(WIN_ID, miniwin.rect_frame, x, y, x + w, y + button_h,
+      WIN.button_frame)
+    WindowText(WIN_ID, FONT, label, x + 12, y + 4, 0, 0, WIN.button_text, true)
+    WindowAddHotspot(WIN_ID, id, x, y, x + w, y + button_h,
+      "", "", "", "", callback, tooltip, miniwin.cursor_hand, 0)
+    return w
+  end
+
+  local send_w = button("send", "Send", PAD,
+    "pastebin_send_click", "Upload to dpaste.org")
+  button("cancel", "Cancel", PAD + send_w + 10,
+    "pastebin_cancel_click", "Close without sending")
+
+  WindowShow(WIN_ID, true)
+  window_open = true
+end
+
+local function do_upload()
+  local bytes = #snapshot.content
+  local label = snapshot.expires_label
+  local opts = pastebin.build_request(snapshot.content, snapshot.expires_value)
+  snapshot = nil
+  opts.callback = function(resp)
+    pending = nil
+    local url, err = pastebin.parse_response(resp)
+    if not url then
+      note("error", "pastebin: upload failed: " .. err)
+      return
+    end
+    ColourTell(COLOURS.text, COLOURS.background, "pastebin: ")
+    Hyperlink(url, url, "Open paste", COLOURS.link, COLOURS.background, 1)
+    Note("")
+    note("dim", "pastebin: expires " .. label .. " -- link copied to clipboard")
+    SetClipboard(url)
+  end
+  pending = client:request(opts)
+  schedule_pump()
+  note("dim", string.format("pastebin: uploading %d bytes ...", bytes))
+end
+
+function pastebin_send_click(flags, hotspot_id)
+  if bit.band(flags, miniwin.hotspot_got_lh_mouse) == 0 then return end
+  close_window()
+  do_upload()
+end
+
+function pastebin_cancel_click(flags, hotspot_id)
+  if bit.band(flags, miniwin.hotspot_got_lh_mouse) == 0 then return end
+  close_window()
+  snapshot = nil
+  note("dim", "pastebin: cancelled -- nothing sent")
+end
+
+function pastebin_command(name, line, wildcards)
+  ensure_client()
+  if not client:tls_available() then
+    note("error", "pastebin: HTTPS unavailable -- install LuaSec to use this plugin")
+    return
+  end
+  if pending then
+    note("dim", "pastebin: an upload is already in progress")
+    return
+  end
+  local value, label = pastebin.parse_expiry(wildcards[1])
+  if not value then
+    note("error", "pastebin: " .. label)
+    return
+  end
+  local content = GetClipboard() or ""
+  if string.match(content, "^%s*$") then
+    note("dim", "pastebin: clipboard is empty -- copy some text first")
+    return
+  end
+  if #content > pastebin.MAX_BYTES then
+    note("error", string.format(
+      "pastebin: clipboard is %.0f KB -- the limit is %.0f KB",
+      #content / 1024, pastebin.MAX_BYTES / 1024))
+    return
+  end
+  snapshot = { content = content, expires_value = value, expires_label = label }
+  close_window()   -- re-running pastebin refreshes the snapshot and window
+  show_window()
+end
+
+function OnPluginClose()
+  if client then client:cancel_all() end
+  close_window()
+end
+
+function OnPluginDisable()
+  if client then client:cancel_all() end
+  close_window()
+end
+
+]]>
+
+</script>
+
+</muclient>
