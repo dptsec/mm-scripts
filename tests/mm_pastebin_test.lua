@@ -14,29 +14,31 @@ local function eq(got, want, label)
 end
 
 add("parse_expiry known values", function()
-  local v, l = pastebin.parse_expiry("1h")
-  eq(v, "3600"); eq(l, "in 1 hour")
-  v, l = pastebin.parse_expiry("1d")
-  eq(v, "86400"); eq(l, "in 1 day")
+  local v, l = pastebin.parse_expiry("1d")
+  eq(v, "1"); eq(l, "in 1 day")
   v, l = pastebin.parse_expiry("1w")
-  eq(v, "604800"); eq(l, "in 1 week")
-  v, l = pastebin.parse_expiry("once")
-  eq(v, "onetime"); eq(l, "after one view")
+  eq(v, "7"); eq(l, "in 1 week")
+  v, l = pastebin.parse_expiry("1m")
+  eq(v, "30"); eq(l, "in 1 month")
 end)
 
 add("parse_expiry default, case, whitespace", function()
   local v = pastebin.parse_expiry(nil)
-  eq(v, "604800", "nil -> default 1w")
+  eq(v, "7", "nil -> default 1w")
   v = pastebin.parse_expiry("")
-  eq(v, "604800", "empty -> default 1w")
-  v = pastebin.parse_expiry("  ONCE  ")
-  eq(v, "onetime", "case/space insensitive")
+  eq(v, "7", "empty -> default 1w")
+  v = pastebin.parse_expiry("  1M  ")
+  eq(v, "30", "case/space insensitive")
 end)
 
 add("parse_expiry unknown", function()
   local v, err = pastebin.parse_expiry("2 weeks")
   eq(v, nil)
-  assert(err and err:find("1h, 1d, 1w or once"), "err lists options: " .. tostring(err))
+  assert(err and err:find("1d, 1w or 1m"), "err lists options: " .. tostring(err))
+  -- dpaste.com has no view-once pastes; the old option must fail loudly
+  v, err = pastebin.parse_expiry("once")
+  eq(v, nil)
+  assert(err and err:find("unknown expiry 'once'"), tostring(err))
 end)
 
 add("preview basic", function()
@@ -79,29 +81,30 @@ add("preview expands tabs", function()
 end)
 
 add("build_request shape", function()
-  local r = pastebin.build_request("hello world", "604800")
-  eq(r.url, "https://dpaste.org/api/")
+  local r = pastebin.build_request("hello world", "7")
+  eq(r.url, "https://dpaste.com/api/v2/")
   eq(r.method, "POST")
   eq(r.headers["Content-Type"], "application/x-www-form-urlencoded")
-  eq(r.body, "lexer=_text&format=url&expires=604800&content=hello%20world")
+  eq(r.body, "syntax=text&expiry_days=7&content=hello%20world")
 end)
 
 add("build_request encodes hostile content", function()
-  local r = pastebin.build_request("a&b=c\nd", "onetime")
-  eq(r.body, "lexer=_text&format=url&expires=onetime&content=a%26b%3Dc%0Ad")
+  local r = pastebin.build_request("a&b=c\nd", "1")
+  eq(r.body, "syntax=text&expiry_days=1&content=a%26b%3Dc%0Ad")
 end)
 
 add("parse_response plain url", function()
-  local url = pastebin.parse_response{ ok = true, status = 200,
-    body = "https://dpaste.org/ABCD\n" }
-  eq(url, "https://dpaste.org/ABCD")
+  -- live shape 2026-08-08: 201, body is the url plus a trailing newline
+  local url = pastebin.parse_response{ ok = true, status = 201,
+    body = "https://dpaste.com/6XUQSU8CV\n" }
+  eq(url, "https://dpaste.com/6XUQSU8CV")
 end)
 
 add("parse_response quoted url", function()
-  -- dpaste's default format wraps the url in quotes; tolerate it
-  local url = pastebin.parse_response{ ok = true, status = 200,
-    body = '"https://dpaste.org/ABCD"' }
-  eq(url, "https://dpaste.org/ABCD")
+  -- defensive: some pastebin APIs wrap the url in quotes; tolerate it
+  local url = pastebin.parse_response{ ok = true, status = 201,
+    body = '"https://dpaste.com/6XUQSU8CV"' }
+  eq(url, "https://dpaste.com/6XUQSU8CV")
 end)
 
 add("parse_response transport error", function()
@@ -116,15 +119,22 @@ add("parse_response garbage body", function()
   assert(err and err:find("unexpected response"), tostring(err))
 end)
 
+add("parse_response rejects a foreign host", function()
+  local url, err = pastebin.parse_response{ ok = true, status = 201,
+    body = "https://evil.example/xyz" }
+  eq(url, nil)
+  assert(err and err:find("unexpected response"), tostring(err))
+end)
+
 add("upload round-trip over TLS", function()
   local fake = fake_socket.new()
-  local url_body = "https://dpaste.org/K7xQ\n"
-  fake:host("dpaste.org", 443, { response =
-    "HTTP/1.1 200 OK\r\nContent-Length: " .. #url_body .. "\r\n\r\n" .. url_body })
+  local url_body = "https://dpaste.com/K7XQ2AB9C\n"
+  fake:host("dpaste.com", 443, { response =
+    "HTTP/1.1 201 CREATED\r\nContent-Length: " .. #url_body .. "\r\n\r\n" .. url_body })
   local client = http.new{ socket = fake.lib, ssl = fake.ssl,
     gettime = fake.lib.gettime }
 
-  local opts = pastebin.build_request("boss log line 1\nline 2", "3600")
+  local opts = pastebin.build_request("boss log line 1\nline 2", "1")
   local got
   opts.callback = function(resp) got = resp end
   client:request(opts)
@@ -135,15 +145,15 @@ add("upload round-trip over TLS", function()
 
   assert(got, "callback fired")
   local url, err = pastebin.parse_response(got)
-  eq(err, nil); eq(url, "https://dpaste.org/K7xQ")
+  eq(err, nil); eq(url, "https://dpaste.com/K7XQ2AB9C")
   eq(client:busy(), false, "idle after completion")
 
   local req = fake.requests[1]
-  assert(req:find("^POST /api/ HTTP/1%.1\r\n"), "request line")
-  assert(req:find("\r\nHost: dpaste%.org\r\n"), "host header")
+  assert(req:find("^POST /api/v2/ HTTP/1%.1\r\n"), "request line")
+  assert(req:find("\r\nHost: dpaste%.com\r\n"), "host header")
   assert(req:find("\r\nContent%-Type: application/x%-www%-form%-urlencoded\r\n"),
     "content type")
-  assert(req:find("lexer=_text&format=url&expires=3600&content=boss%%20log", 1, false),
+  assert(req:find("syntax=text&expiry_days=1&content=boss%%20log", 1, false),
     "form body")
 end)
 

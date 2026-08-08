@@ -5,15 +5,16 @@ local http = require "mm_http"
 
 local M = {}
 
-M.API_URL = "https://dpaste.org/api/"
-M.MAX_BYTES = 204800   -- refuse uploads above this (dpaste's own limit is higher)
+-- dpaste.com API v2 (dpaste.org shut down as a public pastebin in 2026).
+-- Keyless form POST; response body is the paste URL; expiry is whole days.
+M.API_URL = "https://dpaste.com/api/v2/"
+M.MAX_BYTES = 204800   -- refuse uploads above this (dpaste accepts more; verified live)
 M.DEFAULT_EXPIRY = "1w"
 
 local EXPIRY = {
-  ["1h"]   = { value = "3600",    label = "in 1 hour" },
-  ["1d"]   = { value = "86400",   label = "in 1 day" },
-  ["1w"]   = { value = "604800",  label = "in 1 week" },
-  ["once"] = { value = "onetime", label = "after one view" },
+  ["1d"] = { value = "1",  label = "in 1 day" },
+  ["1w"] = { value = "7",  label = "in 1 week" },
+  ["1m"] = { value = "30", label = "in 1 month" },
 }
 
 function M.parse_expiry(arg)
@@ -21,7 +22,7 @@ function M.parse_expiry(arg)
   if arg == "" then arg = M.DEFAULT_EXPIRY end
   local e = EXPIRY[arg]
   if not e then
-    return nil, "unknown expiry '" .. arg .. "' -- use 1h, 1d, 1w or once"
+    return nil, "unknown expiry '" .. arg .. "' -- use 1d, 1w or 1m"
   end
   return e.value, e.label
 end
@@ -59,8 +60,8 @@ function M.build_request(content, expires_value)
     url = M.API_URL,
     method = "POST",
     headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
-    body = "lexer=_text&format=url"
-        .. "&expires=" .. http.urlencode(expires_value)
+    body = "syntax=text"
+        .. "&expiry_days=" .. http.urlencode(expires_value)
         .. "&content=" .. http.urlencode(content),
   }
 end
@@ -71,7 +72,7 @@ function M.parse_response(resp)
   end
   local body = string.match(resp.body or "", "^%s*(.-)%s*$")
   body = string.match(body, '^"(.*)"$') or body
-  if not string.match(body, "^https://dpaste%.org/%S+$") then
+  if not string.match(body, "^https://dpaste%.com/%S+$") then
     return nil, "unexpected response: " .. string.sub(body, 1, 120)
   end
   return body

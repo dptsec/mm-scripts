@@ -8,7 +8,7 @@
    author="Ferdinand"
    id="a493febe0ad0d44295ab78eb"
    language="Lua"
-   purpose="send the clipboard to dpaste.org after confirmation"
+   purpose="send the clipboard to dpaste.com after confirmation"
    save_state="n"
    date_written="2026-08-08 12:00:00"
    requires="4.71"
@@ -18,12 +18,11 @@
 
 <![CDATA[
 
-Uploads the clipboard to dpaste.org as an unlisted, expiring paste --
+Uploads the clipboard to dpaste.com as an unlisted, expiring paste --
 after showing a confirmation window so nothing is sent by mistake.
 
  * pastebin        -- preview & send the clipboard (expires in 1 week)
- * pastebin 1h     -- expire in 1 hour   (also: 1d, 1w)
- * pastebin once   -- paste self-destructs after the first view
+ * pastebin 1d     -- expire in 1 day   (also: 1w, 1m)
 
 On success the paste URL is printed (clickable) and copied to the
 clipboard, ready to share.
@@ -152,7 +151,7 @@ local function show_window()
   WindowFont(WIN_ID, FONT, font_name, font_size)
   local line_h = WindowFontInfo(WIN_ID, FONT, 1)
 
-  local title = "Send clipboard to dpaste.org?"
+  local title = "Send clipboard to dpaste.com?"
   local stats = string.format("%d line%s, %d bytes -- expires %s",
     pv.total_lines, pv.total_lines == 1 and "" or "s",
     pv.bytes, snapshot.expires_label)
@@ -203,7 +202,7 @@ local function show_window()
   end
 
   local send_w = button("send", "Send", PAD,
-    "pastebin_send_click", "Upload to dpaste.org")
+    "pastebin_send_click", "Upload to dpaste.com")
   button("cancel", "Cancel", PAD + send_w + 10,
     "pastebin_cancel_click", "Close without sending")
 
