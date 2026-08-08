@@ -121,24 +121,59 @@ function W.render_page(title, raw, page_url)
     { run("dim", string.rep("-", RULE_WIDTH)) },
   }
   raw = string.gsub(raw, "\r\n", "\n")
+  -- a <br> at end of line is one break, not two
+  raw = string.gsub(raw, "<[Bb][Rr]%s*/?>%s*\n", "\n")
   raw = string.gsub(raw, "<[Bb][Rr]%s*/?>", "\n")
   local last_blank = false
+  local in_pre = false
   for line in string.gmatch(raw .. "\n", "(.-)\n") do
-    local heading = string.match(line, "^=+%s*(.-)%s*=*%s*$")
-    if heading and string.sub(line, 1, 1) == "=" and heading ~= "" then
-      table.insert(lines, { run("heading", heading) })
-      last_blank = false
-    elseif string.match(line, "^%s*$") then
-      if not last_blank and #lines > 2 then
-        table.insert(lines, { run("text", "") })
+    if in_pre then
+      if string.match(line, "^%s*</pre>") then
+        in_pre = false
+      else
+        table.insert(lines, { run("pre", W.decode_entities(line)) })
       end
-      last_blank = true
-    else
-      table.insert(lines, inline_runs(line))
       last_blank = false
+    elseif string.match(line, "^%s*<pre>%s*$") then
+      in_pre = true
+    else
+      local stars, item = string.match(line, "^(%*+)%s*(.*)$")
+      local heading = string.match(line, "^=+%s*(.-)%s*=*%s*$")
+      if stars then
+        local prefix = string.rep("  ", #stars) .. "- "
+        local runs = inline_runs(item)
+        table.insert(runs, 1, run("text", prefix))
+        table.insert(lines, runs)
+        last_blank = false
+      elseif heading and string.sub(line, 1, 1) == "=" and heading ~= "" then
+        table.insert(lines, { run("heading", heading) })
+        last_blank = false
+      elseif string.match(line, "^%s*$") then
+        if not last_blank and #lines > 2 then
+          table.insert(lines, { run("text", "") })
+        end
+        last_blank = true
+      else
+        table.insert(lines, inline_runs(line))
+        last_blank = false
+      end
     end
   end
   table.insert(lines, { run("dim", page_url) })
+  return lines
+end
+
+function W.render_results(term, results)
+  local lines = {
+    { run("heading", string.format("%d pages found for '%s'", #results, term)) },
+  }
+  for i, result in ipairs(results) do
+    table.insert(lines, {
+      run("dim", string.format("%2d. ", i)),
+      run("link", result.title, { action = "ooc " .. i }),
+    })
+  end
+  table.insert(lines, { run("dim", "click a title or type: ooc <number>") })
   return lines
 end
 

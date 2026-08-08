@@ -109,6 +109,53 @@ add("render_page strips unknown tags, decodes entities", function()
   eq(line_text(lines[3]), "Bold html & stuff")
 end)
 
+add("render_page wiki links and urls", function()
+  local raw = "See [[Bazaar]] and [[Goblet_Waxcap|the boss]] or http://x.test/page"
+  local lines = wiki.render_page("T", raw, "u")
+  local runs = lines[3]
+  eq(runs[2].style, "link"); eq(runs[2].text, "Bazaar")
+  eq(runs[2].action, "ooc Bazaar")
+  eq(runs[4].style, "link"); eq(runs[4].text, "the boss")
+  eq(runs[4].action, "ooc Goblet_Waxcap")
+  eq(runs[6].style, "url"); eq(runs[6].url, "http://x.test/page")
+end)
+
+add("render_page lists", function()
+  local raw = "* first\n** nested\n*second"
+  local lines = wiki.render_page("T", raw, "u")
+  eq(line_text(lines[3]), "  - first")
+  eq(line_text(lines[4]), "    - nested")
+  eq(line_text(lines[5]), "  - second")
+end)
+
+add("render_page pre blocks verbatim", function()
+  local raw = "before\n<pre>\nBoss safe: '''not bold''' &amp; <raw>\n</pre>\nafter"
+  local lines = wiki.render_page("T", raw, "u")
+  eq(line_text(lines[3]), "before")
+  eq(lines[4][1].style, "pre")
+  eq(line_text(lines[4]), "Boss safe: '''not bold''' & <raw>")
+  eq(line_text(lines[5]), "after")
+end)
+
+add("render_page trailing br does not double-space", function()
+  -- the wiki ends lines with "<br>\n"; that is one break, not two
+  local raw = "'''Levels:''' 241<br>\n'''Boss Kill:''' Up to 241<br>\n"
+  local lines = wiki.render_page("T", raw, "u")
+  eq(line_text(lines[3]), "Levels: 241")
+  eq(line_text(lines[4]), "Boss Kill: Up to 241")
+end)
+
+add("render_results", function()
+  local results = wiki.parse_search(SEARCH_MULTI).results
+  local lines = wiki.render_results("bracelet", results)
+  assert(line_text(lines[1]):find("3 pages found for 'bracelet'"), line_text(lines[1]))
+  eq(line_text(lines[2]), " 1. Artificing")
+  eq(lines[2][2].style, "link")
+  eq(lines[2][2].action, "ooc 1")
+  eq(lines[4][2].action, "ooc 3")
+  assert(line_text(lines[5]):find("ooc <number>"), "footer hint")
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)
