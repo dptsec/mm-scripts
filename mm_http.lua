@@ -77,7 +77,7 @@ end
 
 local function build_request(method, parsed, headers, body)
   local out = {
-    string.format("%s %s HTTP/1.0\r\n", method, parsed.path),
+    string.format("%s %s HTTP/1.1\r\n", method, parsed.path),
     "Host: " .. parsed.host .. "\r\n",
     "User-Agent: mm-scripts/1.0\r\n",
     "Connection: close\r\n",
@@ -93,26 +93,40 @@ local function build_request(method, parsed, headers, body)
   return table.concat(out)
 end
 
-local function parse_response(text)
+local function parse_head(text)
   local status = tonumber(string.match(text, "^HTTP/%d%.%d (%d%d%d)"))
-  if not status then return nil, "malformed response" end
+  if not status then return nil end
   local header_end = string.find(text, "\r\n\r\n", 1, true)
   local sep = 4
   if not header_end then
     header_end = string.find(text, "\n\n", 1, true)
     sep = 2
   end
-  if not header_end then return nil, "truncated response" end
+  if not header_end then return nil end
   local headers = {}
   for line in string.gmatch(string.sub(text, 1, header_end - 1), "[^\r\n]+") do
     local name, value = string.match(line, "^([%w%-]+):%s*(.*)$")
     if name then headers[string.lower(name)] = value end
   end
-  return {
-    status = status,
-    headers = headers,
-    body = string.sub(text, header_end + sep),
-  }
+  return status, headers, header_end + sep
+end
+
+-- Returns the decoded body when the terminal chunk has arrived, nil while
+-- more data is needed, or nil plus an error for malformed framing.
+local function decode_chunked(body)
+  local out, pos = {}, 1
+  while true do
+    local line_end = string.find(body, "\r\n", pos, true)
+    if not line_end then return nil end
+    local size_hex = string.match(string.sub(body, pos, line_end - 1), "^(%x+)")
+    if not size_hex then return nil, "bad chunk header" end
+    local size = tonumber(size_hex, 16)
+    local data_start = line_end + 2
+    if size == 0 then return table.concat(out) end -- trailers ignored
+    if #body < data_start + size + 1 then return nil end
+    table.insert(out, string.sub(body, data_start, data_start + size - 1))
+    pos = data_start + size + 2
+  end
 end
 
 local function start_connection(self, req, parsed)
@@ -203,26 +217,70 @@ local function step(self, req, now)
   end
 
   if req.state == "receive" then
+    local got_new = false
     for _ = 1, 32 do -- drain without monopolising the tick
       local chunk, rerr, partial = req.sock:receive(8192)
       if chunk then
         table.insert(req.buffer, chunk)
+        got_new = true
       elseif rerr == "timeout" then
-        if partial and partial ~= "" then table.insert(req.buffer, partial) end
-        return
+        if partial and partial ~= "" then
+          table.insert(req.buffer, partial)
+          got_new = true
+        end
+        break
       elseif rerr == "closed" then
         if partial and partial ~= "" then table.insert(req.buffer, partial) end
-        return self:_complete(req)
+        req.closed = true
+        break
       else
         return fail(req, "receive failed: " .. tostring(rerr))
       end
     end
+    if got_new or req.closed then
+      return self:_check_complete(req)
+    end
+    return
   end
 end
 
-function client_methods:_complete(req)
-  local resp, err = parse_response(table.concat(req.buffer))
-  if not resp then return fail(req, err) end
+-- The wiki's Apache never closes HTTP/1.0-over-TLS connections, so
+-- completion is judged from the message itself whenever possible:
+-- chunked framing first, then Content-Length, then server close.
+function client_methods:_check_complete(req)
+  local text = table.concat(req.buffer)
+  local status, headers, body_start = parse_head(text)
+  if not status then
+    if req.closed then return fail(req, "malformed or truncated response") end
+    return
+  end
+  local body = string.sub(text, body_start)
+  local resp_body
+  if string.find(string.lower(headers["transfer-encoding"] or ""), "chunked", 1, true) then
+    local decoded, derr = decode_chunked(body)
+    if derr then return fail(req, derr) end
+    if not decoded then
+      if req.closed then return fail(req, "truncated chunked response") end
+      return
+    end
+    resp_body = decoded
+  else
+    local length = tonumber(headers["content-length"] or "")
+    if length then
+      if #body < length then
+        if req.closed then return fail(req, "truncated response") end
+        return
+      end
+      resp_body = string.sub(body, 1, length)
+    else
+      if not req.closed then return end
+      resp_body = body
+    end
+  end
+  return self:_deliver(req, { status = status, headers = headers, body = resp_body })
+end
+
+function client_methods:_deliver(req, resp)
   if (resp.status == 301 or resp.status == 302) and resp.headers.location then
     if req.redirects_left <= 0 then
       return fail(req, "too many redirects")

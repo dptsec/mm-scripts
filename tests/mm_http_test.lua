@@ -72,7 +72,7 @@ add("happy GET", function()
   eq(got.body, "<html>hello</html>")
   eq(got.headers["content-type"], "text/html; charset=ISO-8859-1")
   eq(client:busy(), false, "idle after completion")
-  assert(fake.requests[1]:find("^GET /Goblet_Waxcap HTTP/1%.0\r\n"), "request line")
+  assert(fake.requests[1]:find("^GET /Goblet_Waxcap HTTP/1%.1\r\n"), "request line")
   assert(fake.requests[1]:find("\r\nHost: ooc%.dune%.net\r\n"), "host header")
   assert(fake.requests[1]:find("\r\nConnection: close\r\n"), "connection close")
 end)
@@ -89,7 +89,7 @@ add("happy POST", function()
   pump(fake, client)
   eq(got.ok, true)
   local req = fake.requests[1]
-  assert(req:find("^POST / HTTP/1%.0\r\n"), "request line")
+  assert(req:find("^POST / HTTP/1%.1\r\n"), "request line")
   assert(req:find("\r\nContent%-Type: application/x%-www%-form%-urlencoded\r\n"), "content type")
   assert(req:find("\r\nContent%-Length: 33\r\n"), "content length")
   assert(req:find("\r\n\r\nsearch=goblet%%20waxcap&dosearch=1$"), "body")
@@ -116,7 +116,7 @@ add("partial sends complete", function()
     callback = function(r) got = r end }
   pump(fake, client)
   eq(got.ok, true)
-  assert(fake.requests[1]:find("^GET /Some_Page HTTP/1%.0\r\n"), "whole request sent")
+  assert(fake.requests[1]:find("^GET /Some_Page HTTP/1%.1\r\n"), "whole request sent")
   assert(fake.requests[1]:find("\r\n\r\n$"), "request terminator sent")
 end)
 
@@ -181,7 +181,7 @@ add("single redirect followed as GET", function()
   cfg.chunks = { RESPONSE_200 } -- second connection gets the real page
   pump(fake, client)
   eq(got.ok, true); eq(got.status, 200)
-  assert(fake.requests[2]:find("^GET /New_Page HTTP/1%.0\r\n"),
+  assert(fake.requests[2]:find("^GET /New_Page HTTP/1%.1\r\n"),
     "redirect refetched as GET: " .. tostring(fake.requests[2]))
 end)
 
@@ -228,6 +228,69 @@ add("handshake failure reported", function()
   pump(fake, client, 10)
   eq(got.ok, false)
   assert(got.err:find("handshake failed"), tostring(got.err))
+end)
+
+-- ooc.dune.net's Apache stalls and never closes HTTP/1.0-over-TLS
+-- connections, so requests go out as HTTP/1.1 and completion is detected
+-- from the message itself (chunked terminal chunk or Content-Length),
+-- never relying on server close alone.
+
+local RESPONSE_CHUNKED = table.concat({
+  "HTTP/1.1 200 OK\r\n",
+  "Transfer-Encoding: chunked\r\n",
+  "Content-Type: text/html\r\n",
+  "\r\n",
+  "5\r\nhello\r\n",
+  "7\r\n world!\r\n",
+  "0\r\n\r\n",
+})
+
+add("chunked response completes without server close", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { response = RESPONSE_CHUNKED, hang = true })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/", callback = function(r) got = r end }
+  pump(fake, client, 20)
+  assert(got, "completed despite the server never closing")
+  eq(got.ok, true); eq(got.status, 200)
+  eq(got.body, "hello world!")
+end)
+
+add("chunked response split across ticks", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { hang = true, chunks = {
+    "HTTP/1.1 200 OK\r\nTransfer-Enco", "ding: chunked\r\n\r\n5\r", "\nhel",
+    "lo\r\n7\r\n world!\r\n", "0\r\n\r\n",
+  } })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/", callback = function(r) got = r end }
+  pump(fake, client, 30)
+  assert(got, "completed despite the server never closing")
+  eq(got.body, "hello world!")
+end)
+
+add("content-length completes without server close", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { hang = true, response =
+    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/", callback = function(r) got = r end }
+  pump(fake, client, 20)
+  assert(got, "completed despite the server never closing")
+  eq(got.body, "hello")
+end)
+
+add("no length markers still completes on close", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { response = RESPONSE_200 })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/", callback = function(r) got = r end }
+  pump(fake, client)
+  eq(got.ok, true); eq(got.body, "<html>hello</html>")
 end)
 
 local failures = 0
