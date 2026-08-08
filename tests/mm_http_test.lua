@@ -95,6 +95,31 @@ add("happy POST", function()
   assert(req:find("\r\n\r\nsearch=goblet%%20waxcap&dosearch=1$"), "body")
 end)
 
+add("drip-fed response across ticks", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { chunks = {
+    "HTTP/1.0 200 OK\r\nContent-Type", ": text/html\r\n\r\n<ht", "ml>slow</html>",
+  }, connect_delay = 0.3 })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/", callback = function(r) got = r end }
+  pump(fake, client)
+  eq(got.ok, true); eq(got.status, 200); eq(got.body, "<html>slow</html>")
+end)
+
+add("partial sends complete", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { response = RESPONSE_200, max_send = 10 })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/Some_Page",
+    callback = function(r) got = r end }
+  pump(fake, client)
+  eq(got.ok, true)
+  assert(fake.requests[1]:find("^GET /Some_Page HTTP/1%.0\r\n"), "whole request sent")
+  assert(fake.requests[1]:find("\r\n\r\n$"), "request terminator sent")
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)
