@@ -88,3 +88,41 @@ On success the paste URL is printed (clickable) and copied to the clipboard, rea
 luajit -bl mm_pastebin.lua > /dev/null
 luajit tests/mm_pastebin_test.lua
 ```
+
+## Updater
+
+[`mm_updater.xml`](mm_updater.xml) keeps the plugins in this repository up to
+date, and can also update old plugins that speak the plugins_updater_v3
+protocol. Keep [`mm_updater.lua`](mm_updater.lua),
+[`mm_crypto.lua`](mm_crypto.lua) and [`mm_http.lua`](mm_http.lua) in the same
+folder as the plugin.
+
+- `update plugins` — check everything and list what is outdated (clickable
+  links).
+- `update plugin <name|id>` — update the plugins matching a name or plugin ID.
+- `update plugins lastlist` — install everything from the last check.
+
+A quiet check also runs about once a day; nothing is ever installed without
+your say-so. Updates are downloaded from this repository over HTTPS and
+verified against SHA-256 hashes from an RSA-signed manifest
+([`manifest.txt`](manifest.txt)) before anything touches disk — a forged or
+tampered manifest is rejected, as is any manifest older than one already
+seen. The previous version of every replaced file is kept next to it with an
+`.old` suffix. Legacy v3-protocol plugins are updated from their original
+locations and marked `[legacy]` in the list (their manifest only carries MD5
+hashes, so the guarantee is weaker).
+
+Publishing a release: commit the plugin changes, run
+`script/publish_manifest.sh` (hashes every distributed file, bumps the
+manifest serial, signs with the key in `~/.config/mm-scripts/`), then commit
+and push the regenerated `manifest.txt`.
+
+### Verification
+
+```sh
+luajit -bl mm_crypto.lua > /dev/null
+luajit -bl mm_updater.lua > /dev/null
+luajit tests/mm_crypto_test.lua
+luajit tests/mm_updater_test.lua
+luajit script/verify_manifest.lua manifest.txt
+```
