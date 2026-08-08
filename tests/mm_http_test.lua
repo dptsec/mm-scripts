@@ -43,6 +43,58 @@ add("latin1_to_utf8", function()
   eq(http.latin1_to_utf8("plain"), "plain")
 end)
 
+local fake_socket = require "fake_socket"
+
+local RESPONSE_200 = table.concat({
+  "HTTP/1.0 200 OK\r\n",
+  "Content-Type: text/html; charset=ISO-8859-1\r\n",
+  "\r\n",
+  "<html>hello</html>",
+})
+
+local function pump(fake, client, ticks)
+  for _ = 1, ticks or 50 do
+    client:tick()
+    fake:advance(0.1)
+  end
+end
+
+add("happy GET", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { response = RESPONSE_200 })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/Goblet_Waxcap",
+    callback = function(resp) got = resp end }
+  pump(fake, client)
+  assert(got, "callback fired")
+  eq(got.ok, true); eq(got.status, 200)
+  eq(got.body, "<html>hello</html>")
+  eq(got.headers["content-type"], "text/html; charset=ISO-8859-1")
+  eq(client:busy(), false, "idle after completion")
+  assert(fake.requests[1]:find("^GET /Goblet_Waxcap HTTP/1%.0\r\n"), "request line")
+  assert(fake.requests[1]:find("\r\nHost: ooc%.dune%.net\r\n"), "host header")
+  assert(fake.requests[1]:find("\r\nConnection: close\r\n"), "connection close")
+end)
+
+add("happy POST", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { response = RESPONSE_200 })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/", method = "POST",
+    headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+    body = "search=goblet%20waxcap&dosearch=1",
+    callback = function(resp) got = resp end }
+  pump(fake, client)
+  eq(got.ok, true)
+  local req = fake.requests[1]
+  assert(req:find("^POST / HTTP/1%.0\r\n"), "request line")
+  assert(req:find("\r\nContent%-Type: application/x%-www%-form%-urlencoded\r\n"), "content type")
+  assert(req:find("\r\nContent%-Length: 33\r\n"), "content length")
+  assert(req:find("\r\n\r\nsearch=goblet%%20waxcap&dosearch=1$"), "body")
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)
