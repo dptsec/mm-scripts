@@ -156,26 +156,46 @@ local function installed_set(cl)
   return set
 end
 
--- One job per outdated plugin, holding only the files that actually
--- changed. dedup_seen spans modern AND legacy planning so shared modules
--- (mm_http.lua) download once per run.
+-- One job per outdated plugin, holding every file of that plugin that
+-- changed -- shared modules appear in each dependent's job (downloads are
+-- deduplicated at fetch time, already-current files skipped at commit
+-- time), so every affected plugin gets reloaded. dedup_seen carries the
+-- scheduled modern files into legacy planning, which must not schedule
+-- them again.
 function U:plan_modern(manifest)
   local jobs = {}
   local installed = installed_set(self.cl)
+
+  -- which installed plugins rely on each dependency file (non-XML)
+  local name_sharers = {}
+  for _, p in ipairs(manifest.plugins) do
+    if installed[p.id] then
+      for _, f in ipairs(p.files) do
+        if f.name ~= p.xml then
+          name_sharers[f.name] = name_sharers[f.name] or {}
+          table.insert(name_sharers[f.name], p.id)
+        end
+      end
+    end
+  end
+  self.name_sharers = name_sharers
+
   self.dedup_seen = {}
+  self.dep_updates = {}
+  local dep_seen = {}
   local self_job
   for _, p in ipairs(manifest.plugins) do
     if installed[p.id] then
       local dir = M.fix_slashes(self.cl.plugin_info(p.id, 20))
-      local files = {}
+      local files, deps, changed = {}, {}, {}
+      local xml_changed = false
       for _, f in ipairs(p.files) do
+        if f.name ~= p.xml then deps[#deps + 1] = f.name end
         local path = dir .. f.name
         local data = self.fs.read(path)
-        local changed = (data == nil)
-          or (self.crypto.sha256_hex(data) ~= f.sha256)
-        local key = f.name .. ":" .. f.sha256
-        if changed and not self.dedup_seen[key] then
-          self.dedup_seen[key] = true
+        if data == nil or self.crypto.sha256_hex(data) ~= f.sha256 then
+          changed[f.name] = true
+          self.dedup_seen[f.name .. ":" .. f.sha256] = true
           files[#files + 1] = {
             name = f.name,
             url = self.config.base_url .. f.name,
@@ -183,7 +203,19 @@ function U:plan_modern(manifest)
             hash_kind = "sha256",
             hash = f.sha256,
             size = f.size,
+            sharers = name_sharers[f.name],
           }
+          if f.name == p.xml then
+            xml_changed = true
+          elseif not dep_seen[f.name] then
+            dep_seen[f.name] = true
+            local used_by = {}
+            for _, id in ipairs(name_sharers[f.name] or {}) do
+              used_by[#used_by + 1] = self.cl.plugin_info(id, 1) or id
+            end
+            self.dep_updates[#self.dep_updates + 1] =
+              { name = f.name, used_by = used_by }
+          end
         end
       end
       if #files > 0 then
@@ -193,6 +225,9 @@ function U:plan_modern(manifest)
           legacy = false,
           dir = dir,
           files = files,
+          deps = deps,
+          changed = changed,
+          xml_changed = xml_changed,
         }
         if p.id == self.config.self_id then
           self_job = job
@@ -215,7 +250,11 @@ function U:plan_available(manifest)
   local installed = installed_set(self.cl)
   for _, p in ipairs(manifest.plugins) do
     if not installed[p.id] then
-      avail[#avail + 1] = { id = p.id, xml = p.xml, plugin = p }
+      local deps = {}
+      for _, f in ipairs(p.files) do
+        if f.name ~= p.xml then deps[#deps + 1] = f.name end
+      end
+      avail[#avail + 1] = { id = p.id, xml = p.xml, plugin = p, deps = deps }
     end
   end
   return avail
@@ -246,6 +285,7 @@ function U:plan_install(entry)
         hash_kind = "sha256",
         hash = f.sha256,
         size = f.size,
+        sharers = self.name_sharers and self.name_sharers[f.name] or nil,
       }
     end
   end
@@ -272,6 +312,7 @@ function U:cancel()
   self.http:cancel_all()
   self.running = false
   self.jobs = nil
+  self._round = nil
 end
 
 function U:_verify(f, body)
@@ -285,13 +326,13 @@ function U:_verify(f, body)
   end
 end
 
-function U:_rollback(job, swapped, why)
+function U:_rollback(job, todo, swapped, why)
   for j = 1, swapped do
-    local p = job.files[j].path
+    local p = todo[j].path
     self.fs.remove(p)
     self.fs.rename(p .. ".old", p)
   end
-  for _, f in ipairs(job.files) do
+  for _, f in ipairs(todo) do
     self.fs.remove(f.path .. ".new")
   end
   self.cl.note("error", string.format(
@@ -300,12 +341,22 @@ function U:_rollback(job, swapped, why)
 end
 
 function U:_commit_job(job)
+  -- files another job already brought current need no work; skipping them
+  -- also keeps their .old backup pointing at the real previous version
+  local todo = {}
+  for _, f in ipairs(job.files) do
+    local disk = self.fs.read(f.path)
+    local current = disk ~= nil and f.hash ==
+      ((f.hash_kind == "sha256")
+        and self.crypto.sha256_hex(disk) or self.crypto.md5_hex(disk))
+    if not current then todo[#todo + 1] = f end
+  end
   -- stage everything first: a failure here leaves the plugin untouched
-  for i, f in ipairs(job.files) do
+  for i, f in ipairs(todo) do
     if f.ensure_dir then self.fs.mkdir(f.ensure_dir) end
     local ok, err = self.fs.write(f.path .. ".new", f.data)
     if not ok then
-      for j = 1, i do self.fs.remove(job.files[j].path .. ".new") end
+      for j = 1, i do self.fs.remove(todo[j].path .. ".new") end
       self.cl.note("error", string.format(
         "mm_updater: cannot write %s.new (%s) -- %s left unchanged",
         f.path, tostring(err), job.name))
@@ -313,20 +364,30 @@ function U:_commit_job(job)
     end
   end
   -- swap each file into place, keeping one .old backup
-  for i, f in ipairs(job.files) do
+  for i, f in ipairs(todo) do
     if self.fs.exists(f.path) then
       self.fs.remove(f.path .. ".old")
       if not self.fs.rename(f.path, f.path .. ".old") then
-        return self:_rollback(job, i - 1, "cannot back up " .. f.path)
+        return self:_rollback(job, todo, i - 1, "cannot back up " .. f.path)
       end
     end
     if not self.fs.rename(f.path .. ".new", f.path) then
       self.fs.rename(f.path .. ".old", f.path)
-      return self:_rollback(job, i - 1, "cannot replace " .. f.path)
+      return self:_rollback(job, todo, i - 1, "cannot replace " .. f.path)
+    end
+  end
+  -- other installed plugins relying on a file this run wrote must be
+  -- reloaded at the end of the run if no job of their own does it
+  if self._round then
+    for _, f in ipairs(todo) do
+      for _, id in ipairs(f.sharers or {}) do
+        self._round.sharers[id] = true
+      end
     end
   end
   -- activate: LoadPlugin for new installs, ReloadPlugin for updates;
   -- reloading the plugin this code runs in is the glue's job
+  if self._round and job.id then self._round.reloaded[job.id] = true end
   if job.install then
     local code = self.cl.load_plugin(job.dir .. job.xml)
     if code == 0 then
@@ -361,6 +422,11 @@ function U:_run_job(job, done)
     if not f then
       return done(self:_commit_job(job))
     end
+    local key = f.url .. ":" .. f.hash
+    if self._round and self._round.cache[key] then
+      f.data = self._round.cache[key]
+      return next_file()
+    end
     self.cl.note("dim", "mm_updater: downloading " .. f.url)
     self.http:request({ url = f.url, callback = function(resp)
       if not resp.ok then
@@ -376,6 +442,7 @@ function U:_run_job(job, done)
         return done(false)
       end
       f.data = resp.body
+      if self._round then self._round.cache[key] = resp.body end
       next_file()
     end })
   end
@@ -507,12 +574,20 @@ function U:plan_legacy(legacy, candidates)
       end
 
       if #files > 0 then
+        local deps, changed = {}, {}
+        for _, f in ipairs(files) do
+          changed[f.name] = true
+          if f.name ~= xml_name then deps[#deps + 1] = f.name end
+        end
         jobs[#jobs + 1] = {
           id = cand.id,
           name = self.cl.plugin_info(cand.id, 1) or cand.id,
           legacy = true,
           dir = dir,
           files = files,
+          deps = deps,
+          changed = changed,
+          xml_changed = changed[xml_name] or false,
         }
       end
     end
@@ -588,18 +663,37 @@ end
 function U:report()
   local jobs = self.jobs
   if jobs and #jobs > 0 then
-    self.cl.note("text", "The following plugins have pending updates:")
+    self.cl.note("text", "Plugin updates:")
     for _, job in ipairs(jobs) do
       local tag = job.legacy and " [legacy]" or ""
       self.cl.link(string.format("* %s%s -- ", job.name, tag),
         "update plugin " .. (job.id or job.name))
+      if job.deps and #job.deps > 0 then
+        local parts = {}
+        for _, dep in ipairs(job.deps) do
+          parts[#parts + 1] = dep
+            .. ((job.changed and job.changed[dep]) and "*" or "")
+        end
+        self.cl.note("dim", "    relies on: " .. table.concat(parts, ", "))
+      end
+    end
+    if self.dep_updates and #self.dep_updates > 0 then
+      self.cl.note("text", "Dependency updates: (* above -- dependent plugins reload automatically)")
+      for _, dep in ipairs(self.dep_updates) do
+        self.cl.note("text", string.format("* %s -- used by: %s",
+          dep.name, table.concat(dep.used_by, ", ")))
+      end
     end
     self.cl.link("Update everything above: ", "update plugins lastlist")
   end
   if self.available and #self.available > 0 then
     self.cl.note("text", "Available to install (not installed yet):")
     for _, entry in ipairs(self.available) do
-      self.cl.link(string.format("* %s -- ", entry.xml),
+      local rely = ""
+      if entry.deps and #entry.deps > 0 then
+        rely = " (relies on: " .. table.concat(entry.deps, ", ") .. ")"
+      end
+      self.cl.link(string.format("* %s%s -- ", entry.xml, rely),
         "install plugin " .. entry.id)
     end
   end
@@ -618,12 +712,37 @@ function U:install_all(done_cb)
   end
   self.running = true
   self.jobs = nil
+  self._round = { cache = {}, sharers = {}, reloaded = {} }
   local summary = { ok = 0, failed = 0, self_updated = false }
   local ji = 0
   local function next_job()
     ji = ji + 1
     local job = jobs[ji]
     if not job then
+      -- reload installed plugins that rely on a file this run updated
+      -- but had no job of their own (e.g. a selective update)
+      local extra = {}
+      for id in pairs(self._round.sharers) do
+        if not self._round.reloaded[id] then extra[#extra + 1] = id end
+      end
+      table.sort(extra)
+      for _, id in ipairs(extra) do
+        if id == self.config.self_id then
+          summary.self_updated = true
+        else
+          local pname = self.cl.plugin_info(id, 1) or id
+          local code = self.cl.reload_plugin(id)
+          if code == 0 then
+            self.cl.note("text", string.format(
+              "mm_updater: %s reloaded (shared dependency updated)", pname))
+          else
+            self.cl.note("error", string.format(
+              "mm_updater: %s uses an updated file but could not be reloaded (code %s) -- reinstall it via File -> Plugins",
+              pname, tostring(code)))
+          end
+        end
+      end
+      self._round = nil
       self.running = false
       if done_cb then done_cb(summary) end
       return

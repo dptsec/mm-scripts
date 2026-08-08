@@ -173,9 +173,12 @@ end
 
 local function fake_cl(plugins)
   -- plugins: array of { id, name, dir, file, fns = { plugin_update_url = "...", ... } }
-  local cl = { notes = {}, links = {}, reloaded = {}, vars = {} }
+  local cl = { notes = {}, links = {}, link_texts = {}, reloaded = {}, vars = {} }
   function cl.note(style, text) table.insert(cl.notes, text) end
-  function cl.link(text, command) table.insert(cl.links, command) end
+  function cl.link(text, command)
+    table.insert(cl.links, command)
+    table.insert(cl.link_texts, text)
+  end
   function cl.plugin_list()
     local ids = {}
     for _, p in ipairs(plugins) do ids[#ids + 1] = p.id end
@@ -222,6 +225,42 @@ local function make_updater(fs, cl, http)
       self_dir = "/plug/",
     },
   })
+end
+
+local function fake_http()
+  local h = { queue = {}, requested = {} }
+  function h:request(opts)
+    table.insert(self.queue, opts)
+    table.insert(self.requested, opts.url)
+    return opts
+  end
+  function h:respond(resp)   -- answer the oldest pending request
+    local o = table.remove(self.queue, 1)
+    assert(o, "no pending request")
+    o.callback(resp)
+  end
+  function h:pending_url()
+    return self.queue[1] and self.queue[1].url
+  end
+  function h:tick() return #self.queue > 0 end
+  function h:busy() return #self.queue > 0 end
+  function h:cancel_all() self.queue = {} end
+  return h
+end
+
+local function ok_resp(body)
+  return { ok = true, status = 200, body = body }
+end
+
+local function job_for(u, id, name, dir, files)
+  return { id = id, name = name, legacy = false, dir = dir, files = files }
+end
+
+local function sha_file(u, name, dir, content)
+  return {
+    name = name, url = BASE .. name, path = dir .. name,
+    hash_kind = "sha256", hash = crypto.sha256_hex(content), size = #content,
+  }
 end
 
 add("plan_modern picks only changed files of installed plugins", function()
@@ -299,7 +338,7 @@ add("plan_modern orders the updater's own job last", function()
   eq(jobs[2].id, "bbbbbbbbbbbbbbbbbbbbbbbb", "self-update runs last")
 end)
 
-add("plan_modern dedups shared files across jobs", function()
+add("plan_modern keeps shared files in every affected job", function()
   local shared = { name = "mm_http.lua", sha256 = string.rep("3", 64), size = 1 }
   local manifest = { serial = 1, plugins = {
     { id = "aaaaaaaaaaaaaaaaaaaaaaaa", xml = "one.xml", files = {
@@ -311,50 +350,126 @@ add("plan_modern dedups shared files across jobs", function()
     { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "one", dir = "/plug/" },
     { id = "cccccccccccccccccccccccc", name = "two", dir = "/plug/" },
   })
-  local jobs = make_updater(fake_fs({}), cl):plan_modern(manifest)
-  local count = 0
+  local u = make_updater(fake_fs({}), cl)
+  local jobs = u:plan_modern(manifest)
+  eq(#jobs, 2)
   for _, job in ipairs(jobs) do
+    local found
     for _, f in ipairs(job.files) do
-      if f.name == "mm_http.lua" then count = count + 1 end
+      if f.name == "mm_http.lua" then
+        found = true
+        eq(#f.sharers, 2, "both installed users recorded on the file")
+      end
     end
+    assert(found, "each affected job carries the shared file")
+    eq(job.xml_changed, true)
+    eq(job.deps[1], "mm_http.lua", "reliance list from the manifest")
+    eq(job.changed["mm_http.lua"], true)
   end
-  eq(count, 1, "shared file downloaded once")
+  eq(#u.dep_updates, 1, "one changed dependency")
+  eq(u.dep_updates[1].name, "mm_http.lua")
+  eq(#u.dep_updates[1].used_by, 2)
+  eq(u.dep_updates[1].used_by[1], "one")
+  eq(u.dep_updates[1].used_by[2], "two")
 end)
 
-local function fake_http()
-  local h = { queue = {} }
-  function h:request(opts)
-    table.insert(self.queue, opts)
-    return opts
-  end
-  function h:respond(resp)   -- answer the oldest pending request
-    local o = table.remove(self.queue, 1)
-    assert(o, "no pending request")
-    o.callback(resp)
-  end
-  function h:pending_url()
-    return self.queue[1] and self.queue[1].url
-  end
-  function h:tick() return #self.queue > 0 end
-  function h:busy() return #self.queue > 0 end
-  function h:cancel_all() self.queue = {} end
-  return h
-end
+add("install_all fetches a shared dependency once, preserves its backup", function()
+  local one_xml, two_xml = "one xml body", "two xml body"
+  local dep_v2 = "dep body v2"
+  local manifest = { serial = 1, plugins = {
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", xml = "one.xml", files = {
+      { name = "one.xml", sha256 = crypto.sha256_hex(one_xml), size = #one_xml },
+      { name = "mm_http.lua", sha256 = crypto.sha256_hex(dep_v2), size = #dep_v2 } } },
+    { id = "cccccccccccccccccccccccc", xml = "two.xml", files = {
+      { name = "two.xml", sha256 = crypto.sha256_hex(two_xml), size = #two_xml },
+      { name = "mm_http.lua", sha256 = crypto.sha256_hex(dep_v2), size = #dep_v2 } } },
+  } }
+  -- both xmls current: only the shared dependency changed
+  local fs = fake_fs({
+    ["/plug/one.xml"] = one_xml,
+    ["/plug/two.xml"] = two_xml,
+    ["/plug/mm_http.lua"] = "dep body v1",
+  })
+  local cl = fake_cl({
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "one", dir = "/plug/" },
+    { id = "cccccccccccccccccccccccc", name = "two", dir = "/plug/" },
+  })
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  u.jobs = u:plan_modern(manifest)
+  eq(#u.jobs, 2, "both dependents affected")
+  local summary
+  u:install_all(function(s) summary = s end)
+  http:respond(ok_resp(dep_v2))
+  assert(summary, "one response finished the whole run (download cached)")
+  eq(#http.requested, 1, "shared file fetched exactly once")
+  eq(summary.ok, 2)
+  eq(fs.files["/plug/mm_http.lua"], dep_v2)
+  eq(fs.files["/plug/mm_http.lua.old"], "dep body v1",
+    "backup is the real previous version, not clobbered by the second job")
+  eq(#cl.reloaded, 2, "both dependents reloaded")
+end)
 
-local function ok_resp(body)
-  return { ok = true, status = 200, body = body }
-end
+add("selective update reloads other installed plugins sharing the file", function()
+  local dep_v2 = "dep body v2"
+  local one_xml = "one xml body"
+  local manifest = { serial = 1, plugins = {
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", xml = "one.xml", files = {
+      { name = "one.xml", sha256 = crypto.sha256_hex(one_xml), size = #one_xml },
+      { name = "mm_http.lua", sha256 = crypto.sha256_hex(dep_v2), size = #dep_v2 } } },
+    { id = "cccccccccccccccccccccccc", xml = "two.xml", files = {
+      { name = "two.xml", sha256 = crypto.sha256_hex("two xml body"), size = 12 },
+      { name = "mm_http.lua", sha256 = crypto.sha256_hex(dep_v2), size = #dep_v2 } } },
+  } }
+  local fs = fake_fs({
+    ["/plug/one.xml"] = one_xml,
+    ["/plug/two.xml"] = "two xml body",
+    ["/plug/mm_http.lua"] = "dep body v1",
+  })
+  local cl = fake_cl({
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "one", dir = "/plug/" },
+    { id = "cccccccccccccccccccccccc", name = "two", dir = "/plug/" },
+  })
+  local http = fake_http()
+  local u = make_updater(fs, cl, http)
+  local jobs = u:plan_modern(manifest)
+  u.jobs = { jobs[1] }               -- user picked 'update plugin one'
+  local summary
+  u:install_all(function(s) summary = s end)
+  http:respond(ok_resp(dep_v2))
+  eq(summary.ok, 1)
+  local seen = {}
+  for _, id in ipairs(cl.reloaded) do seen[id] = true end
+  assert(seen["aaaaaaaaaaaaaaaaaaaaaaaa"], "chosen plugin reloaded")
+  assert(seen["cccccccccccccccccccccccc"],
+    "other user of the updated file reloaded too")
+  local said = table.concat(cl.notes, "\n")
+  assert(string.find(said, "shared dependency"), said)
+end)
 
-local function job_for(u, id, name, dir, files)
-  return { id = id, name = name, legacy = false, dir = dir, files = files }
-end
-
-local function sha_file(u, name, dir, content)
-  return {
-    name = name, url = BASE .. name, path = dir .. name,
-    hash_kind = "sha256", hash = crypto.sha256_hex(content), size = #content,
-  }
-end
+add("report shows relies-on lines and a dependency section", function()
+  local dep_v2 = "dep body v2"
+  local manifest = { serial = 1, plugins = {
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", xml = "one.xml", files = {
+      { name = "one.xml", sha256 = crypto.sha256_hex("new one xml"), size = 11 },
+      { name = "one_extra.lua", sha256 = crypto.sha256_hex("same"), size = 4 },
+      { name = "mm_http.lua", sha256 = crypto.sha256_hex(dep_v2), size = #dep_v2 } } },
+  } }
+  local fs = fake_fs({
+    ["/plug/one_extra.lua"] = "same",   -- current: listed without a star
+  })
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "one", dir = "/plug/" } })
+  local u = make_updater(fs, cl)
+  u.jobs = u:plan_modern(manifest)
+  u.available = {}
+  u:report()
+  local said = table.concat(cl.notes, "\n")
+  assert(string.find(said, "Plugin updates:", 1, true), said)
+  assert(string.find(said, "relies on: one_extra.lua, mm_http.lua*", 1, true),
+    "changed dep starred, current dep not: " .. said)
+  assert(string.find(said, "Dependency updates:", 1, true), said)
+  assert(string.find(said, "mm_http.lua -- used by: one", 1, true), said)
+end)
 
 add("install_all: happy path writes, backs up, reloads", function()
   local fs = fake_fs({ ["/plug/demo_plugin.xml"] = "old xml" })
@@ -695,6 +810,18 @@ end)
 
 local MANIFEST_C = read_file("tests/fixtures/manifest_c.txt")
 
+add("available installs list their dependencies", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local u = make_updater(fake_fs({}), cl)
+  u.jobs = {}
+  u.available = u:plan_available(manifest)
+  eq(u.available[1].deps[1], "extra_module.lua")
+  u:report()
+  local linked = table.concat(cl.link_texts, "\n")
+  assert(string.find(linked, "relies on: extra_module.lua", 1, true), linked)
+end)
+
 add("plan_available lists manifest plugins not installed", function()
   local manifest = assert(updater.parse_manifest(MANIFEST_C, OPTS))
   local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
@@ -782,7 +909,7 @@ add("report lists available installs separately from updates", function()
   eq(cl.links[1], "install plugin dddddddddddddddddddddddd")
   local said = table.concat(cl.notes, "\n")
   assert(string.find(said, "Available to install"), said)
-  assert(not string.find(said, "pending updates"), "no update header without updates")
+  assert(not string.find(said, "Plugin updates"), "no update header without updates")
 end)
 
 add("check populates available without touching jobs", function()
