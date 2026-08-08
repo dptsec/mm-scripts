@@ -197,6 +197,39 @@ add("second redirect is an error", function()
   assert(got.err:find("too many redirects"), tostring(got.err))
 end)
 
+add("https with ssl available", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 443, { response = RESPONSE_200, handshake_ticks = 3 })
+  local client = http.new{ socket = fake.lib, ssl = fake.ssl }
+  eq(client:tls_available(), true)
+  local got
+  client:request{ url = "https://ooc.dune.net/Page", callback = function(r) got = r end }
+  pump(fake, client)
+  eq(got.ok, true); eq(got.status, 200)
+  eq(fake.sockets[1].tls_wrapped, true, "socket was wrapped")
+end)
+
+add("https without ssl fails fast", function()
+  local fake = fake_socket.new()
+  local client = http.new{ socket = fake.lib, ssl = false }
+  eq(client:tls_available(), false)
+  local got
+  client:request{ url = "https://ooc.dune.net/", callback = function(r) got = r end }
+  eq(got.ok, false)
+  assert(got.err:find("HTTPS unavailable"), tostring(got.err))
+end)
+
+add("handshake failure reported", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 443, { response = RESPONSE_200, handshake_fail = true })
+  local client = http.new{ socket = fake.lib, ssl = fake.ssl }
+  local got
+  client:request{ url = "https://ooc.dune.net/", callback = function(r) got = r end }
+  pump(fake, client, 10)
+  eq(got.ok, false)
+  assert(got.err:find("handshake failed"), tostring(got.err))
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)
