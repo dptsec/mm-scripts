@@ -4,19 +4,108 @@
 
 local M = {}
 
--- LuaJIT's bit uses lshift/rshift/bnot; MUSHclient's uses shl/shr/neg.
-local bitlib = _G.bit
-if not bitlib then
-  local ok, lib = pcall(require, "bit")
-  if ok then bitlib = lib end
-end
-assert(bitlib, "mm_crypto: no bit library available")
-local band, bor, bxor = bitlib.band, bitlib.bor, bitlib.bxor
-local bnot = bitlib.bnot or bitlib.neg
-local lshift = bitlib.lshift or bitlib.shl
-local rshift = bitlib.rshift or bitlib.shr
-
 local MOD = 2 ^ 32
+
+------------------------------------------------------------------
+-- Bit operations. No client provides the same library: LuaJIT has
+-- lshift/rshift/bnot, MUSHclient has shl/shr/neg, and MacMUSH (plain
+-- Lua 5.1) has a bit table containing ONLY bor. Every operation is
+-- resolved individually, with exact pure-Lua fallbacks so a missing or
+-- partial bit library can never crash the plugin.
+------------------------------------------------------------------
+
+-- byte-level lookup tables for the pure-Lua fallbacks, built on demand
+local XOR_B, AND_B, OR_B
+
+local function build_tables()
+  if XOR_B then return end
+  XOR_B, AND_B, OR_B = {}, {}, {}
+  for a = 0, 255 do
+    local xa, na, oa = {}, {}, {}
+    XOR_B[a], AND_B[a], OR_B[a] = xa, na, oa
+    for b = 0, 255 do
+      local x, n, o = 0, 0, 0
+      local aa, bb, p = a, b, 1
+      for _ = 1, 8 do
+        local abit, bbit = aa % 2, bb % 2
+        if abit ~= bbit then x = x + p end
+        if abit == 1 and bbit == 1 then n = n + p end
+        if abit == 1 or bbit == 1 then o = o + p end
+        aa = (aa - abit) / 2
+        bb = (bb - bbit) / 2
+        p = p * 2
+      end
+      xa[b], na[b], oa[b] = x, n, o
+    end
+  end
+end
+
+local function bytewise(t, x, y)
+  x, y = x % MOD, y % MOD
+  local r, p = 0, 1
+  for _ = 1, 4 do
+    local xb, yb = x % 256, y % 256
+    r = r + t[xb][yb] * p
+    x = (x - xb) / 256
+    y = (y - yb) / 256
+    p = p * 256
+  end
+  return r
+end
+
+local FALLBACK = {
+  band = function(a, b) build_tables() return bytewise(AND_B, a, b) end,
+  bor = function(a, b) build_tables() return bytewise(OR_B, a, b) end,
+  bxor = function(a, b) build_tables() return bytewise(XOR_B, a, b) end,
+  bnot = function(a) return MOD - 1 - (a % MOD) end,
+  lshift = function(a, n) return ((a % MOD) * 2 ^ n) % MOD end,
+  rshift = function(a, n) return math.floor((a % MOD) / 2 ^ n) end,
+}
+
+-- Build an ops table from candidate libraries, falling back per
+-- operation. Exposed for tests, which exercise the fallback paths.
+function M._make_ops(libs)
+  local function pick(fallback, ...)
+    for _, lib in ipairs(libs) do
+      for i = 1, select("#", ...) do
+        local fn = lib[select(i, ...)]
+        if type(fn) == "function" then return fn end
+      end
+    end
+    return fallback
+  end
+  return {
+    band = pick(FALLBACK.band, "band"),
+    bor = pick(FALLBACK.bor, "bor"),
+    bxor = pick(FALLBACK.bxor, "bxor"),
+    bnot = pick(FALLBACK.bnot, "bnot", "neg"),
+    lshift = pick(FALLBACK.lshift, "lshift", "shl"),
+    rshift = pick(FALLBACK.rshift, "rshift", "shr"),
+  }
+end
+
+local candidates = {}
+do
+  -- require first: on LuaJIT this is the complete built-in module even
+  -- when a partial global shadows it; the global comes second
+  local ok, lib = pcall(require, "bit")
+  if ok and type(lib) == "table" then candidates[#candidates + 1] = lib end
+  if type(_G.bit) == "table" then candidates[#candidates + 1] = _G.bit end
+end
+
+local ops = M._make_ops(candidates)
+
+function M._use_ops(t)                    -- test hook
+  ops = t or M._make_ops(candidates)
+end
+
+local function band(a, b) return ops.band(a, b) end
+local function bor(a, b) return ops.bor(a, b) end
+local function bxor(a, b) return ops.bxor(a, b) end
+local function bnot(a) return ops.bnot(a) end
+local function lshift(a, n) return ops.lshift(a, n) end
+local function rshift(a, n) return ops.rshift(a, n) end
+
 local function norm(x) return x % MOD end
 local function rotr(x, n) return norm(bor(rshift(x, n), lshift(x, 32 - n))) end
 local function rotl(x, n) return norm(bor(lshift(x, n), rshift(x, 32 - n))) end

@@ -311,6 +311,7 @@ end
 function U:cancel()
   self.http:cancel_all()
   self.running = false
+  self.checking = false
   self.jobs = nil
   self._round = nil
 end

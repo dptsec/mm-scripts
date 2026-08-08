@@ -147,6 +147,50 @@ add("rsa_verify rejects tampering", function()
   end
 end)
 
+add("bit fallbacks match the native bit library", function()
+  local native_bit = require "bit"
+  local ops = crypto._make_ops({})          -- force pure-Lua fallbacks
+  local function n32(x) return x % 2 ^ 32 end
+  math.randomseed(20260808)
+  for _ = 1, 200 do
+    local a = math.random(0, 2 ^ 32 - 1)
+    local b = math.random(0, 2 ^ 32 - 1)
+    eq(ops.band(a, b), n32(native_bit.band(a, b)), "band")
+    eq(ops.bor(a, b), n32(native_bit.bor(a, b)), "bor")
+    eq(ops.bxor(a, b), n32(native_bit.bxor(a, b)), "bxor")
+    eq(ops.bnot(a), n32(native_bit.bnot(a)), "bnot")
+    local s = math.random(0, 31)
+    eq(ops.lshift(a, s), n32(native_bit.lshift(a, s)), "lshift by " .. s)
+    eq(ops.rshift(a, s), n32(native_bit.rshift(a, s)), "rshift by " .. s)
+  end
+end)
+
+add("hashes correct with no bit library at all", function()
+  crypto._use_ops(crypto._make_ops({}))
+  local ok, err = pcall(function()
+    eq(crypto.sha256_hex(""),
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    eq(crypto.sha256_hex("abc"),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    eq(crypto.md5_hex("abc"), "900150983cd24fb0d6963f7d28e17f72")
+  end)
+  crypto._use_ops(nil)
+  assert(ok, tostring(err))
+end)
+
+add("hashes correct with MacMUSH's bor-only bit table", function()
+  -- MacMUSH (plain Lua 5.1) exposes a global bit table holding ONLY bor;
+  -- every other operation must come from the fallbacks
+  crypto._use_ops(crypto._make_ops({ { bor = require("bit").bor } }))
+  local ok, err = pcall(function()
+    eq(crypto.sha256_hex("abc"),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    eq(crypto.md5_hex("abc"), "900150983cd24fb0d6963f7d28e17f72")
+  end)
+  crypto._use_ops(nil)
+  assert(ok, tostring(err))
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)

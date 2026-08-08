@@ -796,6 +796,17 @@ add("check: rollback manifest rejected via persisted serial", function()
   assert(string.find(err, "older"), "rollback refused: " .. tostring(err))
 end)
 
+add("cancel clears an in-flight check", function()
+  local http = fake_http()
+  local u = make_updater(fake_fs({}), fake_cl({}), http)
+  u:check(function() end)
+  eq(#http.queue, 1, "manifest request pending")
+  u:cancel()                       -- e.g. plugin disabled mid-check
+  local jobs
+  u:check(function(j) jobs = j end)
+  eq(#http.queue, 1, "a fresh check starts instead of refusing")
+end)
+
 add("check: manifest fetch failure reports an error", function()
   local fake = fake_socket.new()   -- no hosts configured -> connect fails
   local http = require("mm_http").new{
