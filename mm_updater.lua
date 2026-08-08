@@ -127,4 +127,83 @@ function M.fix_legacy_url(url)
   return url
 end
 
+------------------------------------------------------------------
+-- Updater instance
+------------------------------------------------------------------
+
+function M.fix_slashes(s)
+  return (string.gsub(s or "", "\\", "/"))
+end
+
+local U = {}
+local U_mt = { __index = U }
+
+function M.new(deps)
+  return setmetatable({
+    http = deps.http,
+    crypto = deps.crypto,
+    fs = deps.fs,
+    cl = deps.cl,
+    config = deps.config,
+    jobs = nil,          -- last planned jobs, installed by install_all
+    running = false,
+  }, U_mt)
+end
+
+local function installed_set(cl)
+  local set = {}
+  for _, id in ipairs(cl.plugin_list()) do set[id] = true end
+  return set
+end
+
+-- One job per outdated plugin, holding only the files that actually
+-- changed. dedup_seen spans modern AND legacy planning so shared modules
+-- (mm_http.lua) download once per run.
+function U:plan_modern(manifest)
+  local jobs = {}
+  local installed = installed_set(self.cl)
+  self.dedup_seen = {}
+  local self_job
+  for _, p in ipairs(manifest.plugins) do
+    if installed[p.id] then
+      local dir = M.fix_slashes(self.cl.plugin_info(p.id, 20))
+      local files = {}
+      for _, f in ipairs(p.files) do
+        local path = dir .. f.name
+        local data = self.fs.read(path)
+        local changed = (data == nil)
+          or (self.crypto.sha256_hex(data) ~= f.sha256)
+        local key = f.name .. ":" .. f.sha256
+        if changed and not self.dedup_seen[key] then
+          self.dedup_seen[key] = true
+          files[#files + 1] = {
+            name = f.name,
+            url = self.config.base_url .. f.name,
+            path = path,
+            hash_kind = "sha256",
+            hash = f.sha256,
+            size = f.size,
+          }
+        end
+      end
+      if #files > 0 then
+        local job = {
+          id = p.id,
+          name = self.cl.plugin_info(p.id, 1) or p.xml,
+          legacy = false,
+          dir = dir,
+          files = files,
+        }
+        if p.id == self.config.self_id then
+          self_job = job
+        else
+          jobs[#jobs + 1] = job
+        end
+      end
+    end
+  end
+  if self_job then jobs[#jobs + 1] = self_job end
+  return jobs
+end
+
 return M

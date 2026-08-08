@@ -145,6 +145,175 @@ add("fix_legacy_url rewrites dead hosts", function()
     "https://example.org/x.xml", "unrelated urls untouched")
 end)
 
+------------------------------------------------------------------
+-- fakes shared by planner/installer tests
+------------------------------------------------------------------
+
+local function fake_fs(files)
+  -- files: map full path -> content; mutated in place by write/rename
+  local fs = { files = files or {}, fail_write = {}, fail_rename = {} }
+  function fs.read(path) return fs.files[path] end
+  function fs.exists(path) return fs.files[path] ~= nil end
+  function fs.write(path, data)
+    if fs.fail_write[path] then return nil, "disk full" end
+    fs.files[path] = data
+    return true
+  end
+  function fs.rename(old, new)
+    if fs.fail_rename[old] then return nil, "locked" end
+    if fs.files[old] == nil then return nil, "no such file" end
+    fs.files[new] = fs.files[old]
+    fs.files[old] = nil
+    return true
+  end
+  function fs.remove(path) fs.files[path] = nil return true end
+  function fs.mkdir(path) fs.made = fs.made or {}; table.insert(fs.made, path) return true end
+  return fs
+end
+
+local function fake_cl(plugins)
+  -- plugins: array of { id, name, dir, file, fns = { plugin_update_url = "...", ... } }
+  local cl = { notes = {}, links = {}, reloaded = {}, vars = {} }
+  function cl.note(style, text) table.insert(cl.notes, text) end
+  function cl.link(text, command) table.insert(cl.links, command) end
+  function cl.plugin_list()
+    local ids = {}
+    for _, p in ipairs(plugins) do ids[#ids + 1] = p.id end
+    return ids
+  end
+  local function find(id)
+    for _, p in ipairs(plugins) do if p.id == id then return p end end
+  end
+  function cl.plugin_info(id, n)
+    local p = find(id)
+    if not p then return nil end
+    if n == 1 then return p.name end
+    if n == 20 then return p.dir end
+    if n == 6 then return p.file or (p.dir .. p.name .. ".xml") end
+  end
+  function cl.call_plugin(id, fn)
+    local p = find(id)
+    if p and p.fns and p.fns[fn] then return 0, p.fns[fn] end
+    return 30011, nil   -- eNoSuchRoutine
+  end
+  function cl.reload_plugin(id) table.insert(cl.reloaded, id) return 0 end
+  function cl.get_var(name) return cl.vars[name] end
+  function cl.set_var(name, value) cl.vars[name] = value end
+  function cl.app_dir() return "/mush/" end
+  return cl
+end
+
+local BASE = "https://raw.githubusercontent.com/dptsec/mm-scripts/main/"
+
+local function make_updater(fs, cl, http)
+  return updater.new({
+    http = http, crypto = crypto, fs = fs, cl = cl,
+    config = {
+      base_url = BASE,
+      pubkey_n = PUBKEY_N,
+      legacy_manifest_url = "https://raw.githubusercontent.com/MateriaMagicaLLC/mm-mushclient-scripts/master/text/plugins_versions.txt",
+      self_id = "bbbbbbbbbbbbbbbbbbbbbbbb",
+    },
+  })
+end
+
+add("plan_modern picks only changed files of installed plugins", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_A, OPTS))
+  -- installed copy: xml is stale, module matches the manifest hash
+  local fs = fake_fs({
+    ["/plug/demo_plugin.xml"] = "demo-xml-OLD",
+    ["/plug/demo_module.lua"] = "demo-lua-v1",
+  })
+  local cl = fake_cl({
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" },
+    { id = "cccccccccccccccccccccccc", name = "other", dir = "/other/" },
+  })
+  local u = make_updater(fs, cl)
+  local jobs = u:plan_modern(manifest)
+  eq(#jobs, 1)
+  eq(jobs[1].id, "aaaaaaaaaaaaaaaaaaaaaaaa")
+  eq(jobs[1].legacy, false)
+  eq(#jobs[1].files, 1, "only the stale file is scheduled")
+  eq(jobs[1].files[1].name, "demo_plugin.xml")
+  eq(jobs[1].files[1].url, BASE .. "demo_plugin.xml")
+  eq(jobs[1].files[1].path, "/plug/demo_plugin.xml")
+  eq(jobs[1].files[1].hash_kind, "sha256")
+  eq(jobs[1].files[1].size, 11)
+end)
+
+add("plan_modern: missing local file counts as changed", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_A, OPTS))
+  local fs = fake_fs({})   -- nothing on disk
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  local u = make_updater(fs, cl)
+  local jobs = u:plan_modern(manifest)
+  eq(#jobs, 1)
+  eq(#jobs[1].files, 2, "both files scheduled")
+end)
+
+add("plan_modern: up-to-date and not-installed produce no jobs", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_A, OPTS))
+  local fs = fake_fs({
+    ["/plug/demo_plugin.xml"] = "demo-xml-v1",
+    ["/plug/demo_module.lua"] = "demo-lua-v1",
+  })
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" } })
+  eq(#make_updater(fs, cl):plan_modern(manifest), 0, "all current")
+
+  cl = fake_cl({})   -- manifest plugin not installed at all
+  eq(#make_updater(fake_fs({}), cl):plan_modern(manifest), 0)
+end)
+
+add("plan_modern normalizes backslash dirs", function()
+  local manifest = assert(updater.parse_manifest(MANIFEST_A, OPTS))
+  local fs = fake_fs({})
+  local cl = fake_cl({ { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo",
+    dir = "C:\\mush\\plugins\\" } })
+  local jobs = make_updater(fs, cl):plan_modern(manifest)
+  eq(jobs[1].files[1].path, "C:/mush/plugins/demo_plugin.xml")
+end)
+
+add("plan_modern orders the updater's own job last", function()
+  -- ordering is pure logic, so feed plan_modern a hand-built manifest
+  -- table (parse_manifest is already covered separately)
+  local manifest = { serial = 1, plugins = {
+    { id = "bbbbbbbbbbbbbbbbbbbbbbbb", xml = "mm_updater.xml", files = {
+      { name = "mm_updater.xml", sha256 = string.rep("1", 64), size = 1 } } },
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", xml = "demo_plugin.xml", files = {
+      { name = "demo_plugin.xml", sha256 = string.rep("2", 64), size = 1 } } },
+  } }
+  local cl = fake_cl({
+    { id = "bbbbbbbbbbbbbbbbbbbbbbbb", name = "mm_updater", dir = "/plug/" },
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "demo", dir = "/plug/" },
+  })
+  local jobs = make_updater(fake_fs({}), cl):plan_modern(manifest)
+  eq(#jobs, 2)
+  eq(jobs[1].id, "aaaaaaaaaaaaaaaaaaaaaaaa")
+  eq(jobs[2].id, "bbbbbbbbbbbbbbbbbbbbbbbb", "self-update runs last")
+end)
+
+add("plan_modern dedups shared files across jobs", function()
+  local shared = { name = "mm_http.lua", sha256 = string.rep("3", 64), size = 1 }
+  local manifest = { serial = 1, plugins = {
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", xml = "one.xml", files = {
+      { name = "one.xml", sha256 = string.rep("1", 64), size = 1 }, shared } },
+    { id = "cccccccccccccccccccccccc", xml = "two.xml", files = {
+      { name = "two.xml", sha256 = string.rep("2", 64), size = 1 }, shared } },
+  } }
+  local cl = fake_cl({
+    { id = "aaaaaaaaaaaaaaaaaaaaaaaa", name = "one", dir = "/plug/" },
+    { id = "cccccccccccccccccccccccc", name = "two", dir = "/plug/" },
+  })
+  local jobs = make_updater(fake_fs({}), cl):plan_modern(manifest)
+  local count = 0
+  for _, job in ipairs(jobs) do
+    for _, f in ipairs(job.files) do
+      if f.name == "mm_http.lua" then count = count + 1 end
+    end
+  end
+  eq(count, 1, "shared file downloaded once")
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)
