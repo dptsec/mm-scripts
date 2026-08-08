@@ -223,6 +223,31 @@ end
 function client_methods:_complete(req)
   local resp, err = parse_response(table.concat(req.buffer))
   if not resp then return fail(req, err) end
+  if (resp.status == 301 or resp.status == 302) and resp.headers.location then
+    if req.redirects_left <= 0 then
+      return fail(req, "too many redirects")
+    end
+    req.redirects_left = req.redirects_left - 1
+    local location = resp.headers.location
+    local target
+    if string.match(location, "^https?://") then
+      target = location
+    elseif string.sub(location, 1, 1) == "/" then
+      local p = req.parsed
+      local default = (p.scheme == "https") and 443 or 80
+      local authority = p.host
+      if p.port ~= default then authority = authority .. ":" .. p.port end
+      target = p.scheme .. "://" .. authority .. location
+    else
+      return fail(req, "unsupported redirect: " .. location)
+    end
+    req.sock:close()
+    local parsed, perr = M.parse_url(target)
+    if not parsed then return fail(req, perr) end
+    req.method = "GET"
+    req.body = nil
+    return start_connection(self, req, parsed)
+  end
   resp.ok = resp.status < 400
   if not resp.ok then
     resp.err = "HTTP " .. resp.status

@@ -168,6 +168,35 @@ add("bad url fails synchronously", function()
   eq(client:busy(), false)
 end)
 
+local REDIRECT_302 = "HTTP/1.0 302 Found\r\nLocation: /New_Page\r\n\r\n"
+
+add("single redirect followed as GET", function()
+  local fake = fake_socket.new()
+  local cfg = fake:host("ooc.dune.net", 80, { chunks = { REDIRECT_302 } })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/Old_Page", method = "POST",
+    body = "x=1", callback = function(r) got = r end }
+  pump(fake, client, 5)
+  cfg.chunks = { RESPONSE_200 } -- second connection gets the real page
+  pump(fake, client)
+  eq(got.ok, true); eq(got.status, 200)
+  assert(fake.requests[2]:find("^GET /New_Page HTTP/1%.0\r\n"),
+    "redirect refetched as GET: " .. tostring(fake.requests[2]))
+end)
+
+add("second redirect is an error", function()
+  local fake = fake_socket.new()
+  fake:host("ooc.dune.net", 80, { chunks = { REDIRECT_302 } })
+  local client = http.new{ socket = fake.lib }
+  local got
+  client:request{ url = "http://ooc.dune.net/A", callback = function(r) got = r end }
+  pump(fake, client, 5)  -- first redirect: reconnects, gets 302 again
+  pump(fake, client, 5)
+  eq(got.ok, false)
+  assert(got.err:find("too many redirects"), tostring(got.err))
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)
