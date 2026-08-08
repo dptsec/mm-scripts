@@ -57,4 +57,89 @@ function W.find_exact(term, results)
   return nil
 end
 
+local function run(style, text, extra)
+  local r = { style = style, text = text }
+  if extra then
+    for key, value in pairs(extra) do r[key] = value end
+  end
+  return r
+end
+
+-- inline markup, scanned left to right; first match wins, earliest position
+-- wins across patterns. Handlers return a run.
+local INLINE = {
+  { pattern = "%[%[([^%]|]-)|([^%]]-)%]%]",
+    make = function(target, label)
+      return run("link", label, { action = "ooc " .. target }) end },
+  { pattern = "%[%[([^%]]-)%]%]",
+    make = function(target)
+      return run("link", target, { action = "ooc " .. target }) end },
+  { pattern = "'''(.-)'''",
+    make = function(text) return run("bold", text) end },
+  { pattern = "''(.-)''",
+    make = function(text) return run("italic", text) end },
+  { pattern = "(https?://[%w%-%._~:/%?#%[%]@!%$&'%(%)%*%+,;=%%]+)",
+    make = function(url) return run("url", url, { url = url }) end },
+}
+
+local function plain(text, out)
+  text = string.gsub(text, "<[^>]->", "")
+  text = W.decode_entities(text)
+  if text ~= "" then table.insert(out, run("text", text)) end
+end
+
+local function inline_runs(text)
+  local out = {}
+  local pos = 1
+  while pos <= #text do
+    local best_start, best_stop, best_make, c1, c2
+    for _, rule in ipairs(INLINE) do
+      local s, e, a, b = string.find(text, rule.pattern, pos)
+      if s and (not best_start or s < best_start) then
+        best_start, best_stop, best_make, c1, c2 = s, e, rule.make, a, b
+      end
+    end
+    if not best_start then
+      plain(string.sub(text, pos), out)
+      break
+    end
+    if best_start > pos then
+      plain(string.sub(text, pos, best_start - 1), out)
+    end
+    table.insert(out, best_make(c1, c2))
+    pos = best_stop + 1
+  end
+  if #out == 0 then table.insert(out, run("text", "")) end
+  return out
+end
+
+local RULE_WIDTH = 60
+
+function W.render_page(title, raw, page_url)
+  local lines = {
+    { run("heading", title) },
+    { run("dim", string.rep("-", RULE_WIDTH)) },
+  }
+  raw = string.gsub(raw, "\r\n", "\n")
+  raw = string.gsub(raw, "<[Bb][Rr]%s*/?>", "\n")
+  local last_blank = false
+  for line in string.gmatch(raw .. "\n", "(.-)\n") do
+    local heading = string.match(line, "^=+%s*(.-)%s*=*%s*$")
+    if heading and string.sub(line, 1, 1) == "=" and heading ~= "" then
+      table.insert(lines, { run("heading", heading) })
+      last_blank = false
+    elseif string.match(line, "^%s*$") then
+      if not last_blank and #lines > 2 then
+        table.insert(lines, { run("text", "") })
+      end
+      last_blank = true
+    else
+      table.insert(lines, inline_runs(line))
+      last_blank = false
+    end
+  end
+  table.insert(lines, { run("dim", page_url) })
+  return lines
+end
+
 return W

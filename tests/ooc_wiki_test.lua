@@ -59,6 +59,56 @@ add("decoders", function()
   eq(wiki.decode_entities("a &amp;&lt;&gt;&quot;&#39;&nbsp;z"), "a &<>\"' z")
 end)
 
+-- flatten helpers for asserting on rendered lines
+local function line_text(line)
+  local parts = {}
+  for _, run in ipairs(line) do table.insert(parts, run.text) end
+  return table.concat(parts)
+end
+
+local function styles_of(line)
+  local parts = {}
+  for _, run in ipairs(line) do table.insert(parts, run.style) end
+  return table.concat(parts, ",")
+end
+
+add("render_page banner and footer", function()
+  local lines = wiki.render_page("Goblet Waxcap", "hello", "http://ooc.dune.net/Goblet_Waxcap")
+  eq(line_text(lines[1]), "Goblet Waxcap")
+  eq(lines[1][1].style, "heading")
+  eq(line_text(lines[2]), string.rep("-", 60))
+  eq(line_text(lines[3]), "hello")
+  eq(line_text(lines[#lines]), "http://ooc.dune.net/Goblet_Waxcap")
+  eq(lines[#lines][1].style, "dim")
+end)
+
+add("render_page inline styles and br", function()
+  local raw = "'''Location:''' the Bazaar<br>plain ''and italic'' end"
+  local lines = wiki.render_page("T", raw, "u")
+  eq(line_text(lines[3]), "Location: the Bazaar")
+  eq(lines[3][1].style, "bold")
+  eq(lines[3][1].text, "Location:")
+  eq(lines[3][2].style, "text")
+  eq(line_text(lines[4]), "plain and italic end")
+  eq(styles_of(lines[4]), "text,italic,text")
+end)
+
+add("render_page headings and paragraph collapse", function()
+  local raw = "== Loot ==\r\n\r\n\r\nSafe text\r\nmore"
+  local lines = wiki.render_page("T", raw, "u")
+  eq(line_text(lines[3]), "Loot")
+  eq(lines[3][1].style, "heading")
+  eq(line_text(lines[4]), "")
+  eq(line_text(lines[5]), "Safe text")
+  eq(line_text(lines[6]), "more")
+end)
+
+add("render_page strips unknown tags, decodes entities", function()
+  local raw = "<strong>Bold html</strong> &amp; <em>stuff</em>"
+  local lines = wiki.render_page("T", raw, "u")
+  eq(line_text(lines[3]), "Bold html & stuff")
+end)
+
 local failures = 0
 for _, test in ipairs(tests) do
   local ok, err = pcall(test.fn)
