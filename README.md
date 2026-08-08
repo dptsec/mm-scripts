@@ -9,6 +9,7 @@ A collection of scripts for [Materia Magica](https://www.materiamagica.com), wri
 3. Click **Add...** in the same dialog and select `MM_GMCP_Mapper_GMCP.xml`.
 4. Optionally add `path_locator.xml` the same way. It reads the mapper's database, so install the mapper first.
 5. Optionally add `ooc_wiki.xml` the same way (keep `mm_http.lua` and `ooc_wiki.lua` next to it).
+6. Optionally add `mm_pastebin.xml` the same way (keep `mm_http.lua` and `mm_pastebin.lua` next to it).
 
 If you were previously on a very old mapper whose database was named `<world address>_mapper.db`, the plugin will prompt you to run `mapper upgrade database` to convert it — the client may appear frozen for several minutes while it converts.
 
@@ -70,4 +71,20 @@ luajit -bl mm_http.lua > /dev/null
 luajit -bl ooc_wiki.lua > /dev/null
 luajit tests/mm_http_test.lua
 luajit tests/ooc_wiki_test.lua
+```
+
+## Pastebin
+
+[`mm_pastebin.xml`](mm_pastebin.xml) uploads the clipboard to [dpaste.com](https://dpaste.com) as an unlisted, expiring paste — after a confirmation window, so nothing is sent by mistake. Keep [`mm_http.lua`](mm_http.lua) and [`mm_pastebin.lua`](mm_pastebin.lua) in the same folder as the plugin.
+
+- `pastebin` — preview the clipboard in a miniwindow; click **Send** to upload (expires in 1 week) or **Cancel** to abort. Running `pastebin` again refreshes the preview from the clipboard.
+- `pastebin 1d` / `1w` / `1m` — choose the expiry (1 day, 1 week, 1 month).
+
+On success the paste URL is printed (clickable) and copied to the clipboard, ready to share. Uploads require TLS (always available on MacMUSH; on MUSHclient install [LuaSec](https://github.com/lunarmodules/luasec)) — the plugin refuses to send your text over plain HTTP.
+
+### Verification
+
+```sh
+luajit -bl mm_pastebin.lua > /dev/null
+luajit tests/mm_pastebin_test.lua
 ```
