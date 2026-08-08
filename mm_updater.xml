@@ -30,9 +30,14 @@ plugins_updater_v3 protocol.
                                is not installed yet
 
 Checks run automatically about once a day; nothing installs without you
-asking. Updates are verified against SHA-256 hashes from an RSA-signed
-manifest before touching disk; the previous version of every file is kept
-next to it with an .old suffix.
+asking. The update list separates plugins from the dependency files they
+rely on: each plugin line shows its dependencies (* marks files that will
+be updated), and shared dependency updates list every plugin using them.
+Plugins relying on an updated file are reloaded automatically.
+
+Updates are verified against SHA-256 hashes from an RSA-signed manifest
+before touching disk; the previous version of every file is kept next to
+it with an .old suffix.
 
 Keep mm_updater.lua, mm_crypto.lua and mm_http.lua in the same folder as
 this plugin. Requires TLS: always available on MacMUSH; on MUSHclient

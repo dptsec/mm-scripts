@@ -98,7 +98,12 @@ protocol. Keep [`mm_updater.lua`](mm_updater.lua),
 folder as the plugin.
 
 - `update plugins` — check everything and list what is outdated, plus any
-  plugins from this repository you don't have yet (clickable links).
+  plugins from this repository you don't have yet (clickable links). The
+  list separates plugin updates from dependency updates: each plugin shows
+  the dependency files it relies on (`*` marks the ones being updated), and
+  shared dependencies list every plugin that uses them. Plugins relying on
+  an updated file are reloaded automatically, even when only the shared
+  file changed.
 - `update plugin <name|id>` — update the plugins matching a name or plugin ID.
 - `update plugins lastlist` — install everything from the last check.
 - `install plugin <name|id>` — install a listed plugin you don't have yet.
